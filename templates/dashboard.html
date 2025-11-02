@@ -1,0 +1,78 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="row">
+  <div class="col-lg-6">
+    <div class="card shadow-sm mb-3">
+      <div class="card-body">
+        <h2 class="h5">ダッシュボード</h2>
+        <form method="post" action="" class="mt-3 d-flex gap-2 flex-wrap">
+          <input type="hidden" name="csrf_token" value="{{ session.csrf_token }}">
+          {% if not open_shift %}
+            <button formaction="{{ url_for('clock_in') }}" class="btn btn-success">出勤</button>
+          {% else %}
+            <button formaction="{{ url_for('clock_out') }}" class="btn btn-danger">退勤</button>
+            {% if not open_break %}
+              <button formaction="{{ url_for('break_start') }}" class="btn btn-outline-secondary">休憩開始</button>
+            {% else %}
+              <button formaction="{{ url_for('break_end') }}" class="btn btn-secondary">休憩終了</button>
+            {% endif %}
+          {% endif %}
+        </form>
+
+        <div class="mt-3">
+          <dl class="row mb-0">
+            <dt class="col-4">勤務状態</dt>
+            <dd class="col-8">
+              {% if not open_shift %}
+                非勤務
+              {% else %}
+                勤務中
+                {% if open_break %}（休憩中）{% endif %}
+              {% endif %}
+            </dd>
+            <dt class="col-4">出勤</dt>
+            <dd class="col-8">{{ open_shift.clock_in_at|fmt_dt if open_shift else '-' }}</dd>
+            <dt class="col-4">休憩</dt>
+            <dd class="col-8">{% if open_break %}開始: {{ open_break.start_at|fmt_dt }}{% else %}-{% endif %}</dd>
+          </dl>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-lg-6">
+    <div class="card shadow-sm mb-3">
+      <div class="card-body">
+        <h2 class="h5 mb-3">最近の打刻</h2>
+        <div class="table-responsive">
+          <table class="table table-sm align-middle">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>出勤</th>
+                <th>退勤</th>
+                <th>休憩合計</th>
+                <th>実働</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for s in recent %}
+              <tr>
+                <td>#{{ s.id }}</td>
+                <td>{{ s.clock_in_at|fmt_dt }}</td>
+                <td>{{ s.clock_out_at|fmt_dt }}</td>
+                <td>{{ s.total_break_seconds()|fmt_hms }}</td>
+                <td>{{ s.worked_seconds()|fmt_hms }}</td>
+              </tr>
+              {% else %}
+              <tr><td colspan="5" class="text-muted">記録がありません。</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        <p class="text-muted small mb-0">* すべての時刻は {{ LOCAL_TZ_NAME }} 表示、保存はUTC。</p>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
