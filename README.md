@@ -60,6 +60,11 @@ gunicorn -w 3 -b 0.0.0.0:8000 app:app
     - `DATABASE_URL`（**PostgreSQL** のURL）
     - `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `OAUTH_REDIRECT_URI`
     - `SESSION_COOKIE_SECURE=true`（HTTPS運用時）
+    - **定期CSV送信**（任意）:
+      - `CSV_EXPORT_EMAIL`: 送信先メールアドレス
+      - `CSV_EXPORT_SCHEDULE`: `daily`（毎日）/ `weekly`（毎週月曜）/ `monthly`（毎月1日）/ cron形式（例: `0 9 * * *`）
+      - `CSV_EXPORT_DAYS`: 過去何日分をエクスポートするか（既定: 30日）
+      - `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_USE_TLS`, `SMTP_FROM`
   - 公開URL を Google OAuth のリダイレクトURIに設定
 
 > 任意の PaaS を使えます（**Docker 不要**）。`Procfile` があるので多くのサービスでそのまま起動できます。
@@ -70,8 +75,10 @@ gunicorn -w 3 -b 0.0.0.0:8000 app:app
 
 - Google ログイン（/login → Google → /auth/callback）
 - ダッシュボード：出勤/退勤/休憩開始/休憩終了
-- 管理画面：期間/メールで絞込、CSV エクスポート
-- 監査ログ：`audit_logs`（IP・UA・HMAC署名）
+- 管理画面：期間/メールで絞込、CSV エクスポート、出退勤データの編集
+- **定期CSV自動送信**: スケジュールに従って自動的にCSVをメール送信
+- **データ編集機能**: 管理者が出退勤時刻を編集可能（変更前後の値が監査ログに記録）
+- 監査ログ：`audit_logs`（IP・UA・HMAC署名、編集履歴を含む）
 - すべての時刻は **UTC 保存**、表示は `TIMEZONE`（既定: Asia/Tokyo）
 
 ---
@@ -82,6 +89,7 @@ gunicorn -w 3 -b 0.0.0.0:8000 app:app
 - `SECRET_KEY` は十分な長さのランダム値を設定。
 - 本番は必ず **HTTPS** ＋ `SESSION_COOKIE_SECURE=true` を推奨。
 - 管理者メールは `ADMIN_EMAILS` に登録。
+- **データ編集機能**: 管理者による出退勤データの編集は監査ログに変更前後の値が記録されます。監査要件を満たしています。
 
 ---
 

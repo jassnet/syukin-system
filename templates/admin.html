@@ -32,6 +32,7 @@
             <th>休憩(数/合計)</th>
             <th>実働</th>
             <th>IP (in/out)</th>
+            <th>操作</th>
           </tr>
         </thead>
         <tbody>
@@ -43,9 +44,10 @@
             <td>{{ s.breaks|length }} / {{ s.total_break_seconds()|fmt_hms }}</td>
             <td>{{ s.worked_seconds()|fmt_hms }}</td>
             <td class="small">{{ s.clock_in_ip or '-' }}<br>{{ s.clock_out_ip or '-' }}</td>
+            <td><a href="{{ url_for('admin_shift_edit', shift_id=s.id) }}" class="btn btn-sm btn-outline-primary">編集</a></td>
           </tr>
           {% else %}
-          <tr><td colspan="6" class="text-muted">該当なし</td></tr>
+          <tr><td colspan="7" class="text-muted">該当なし</td></tr>
           {% endfor %}
         </tbody>
       </table>

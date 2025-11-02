@@ -7,11 +7,16 @@ import json
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
-from flask import Flask, render_template, redirect, url_for, session, request, abort, flash, make_response
+from flask import Flask, render_template, redirect, url_for, session, request, abort, flash, make_response, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from authlib.integrations.flask_client import OAuth
 from werkzeug.middleware.proxy_fix import ProxyFix
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
 
 def env_bool(name, default=False):
     v = os.getenv(name)
@@ -35,6 +40,10 @@ app.config["SESSION_COOKIE_SECURE"] = env_bool("SESSION_COOKIE_SECURE", False)
 LOCAL_TZ = ZoneInfo(os.getenv("TIMEZONE", "Asia/Tokyo"))
 ADMIN_EMAILS = set([e.strip().lower() for e in (os.getenv("ADMIN_EMAILS") or "").split(",") if e.strip()])
 ALLOW_DEV_LOGIN = env_bool("ALLOW_DEV_LOGIN", False)
+# 定期CSV送信設定
+CSV_EXPORT_EMAIL = os.getenv("CSV_EXPORT_EMAIL", "").strip()
+CSV_EXPORT_SCHEDULE = os.getenv("CSV_EXPORT_SCHEDULE", "")  # 例: "daily" (毎日), "weekly" (毎週月曜), "monthly" (毎月1日), cron形式も可
+CSV_EXPORT_DAYS = int(os.getenv("CSV_EXPORT_DAYS", "30"))  # 過去何日分をエクスポートするか
 
 db = SQLAlchemy(app)
 
@@ -371,26 +380,16 @@ def admin():
     shifts = q.order_by(Shift.clock_in_at.desc()).all()
     return render_template("admin.html", shifts=shifts, start=start_date.isoformat(), end=end_date.isoformat(), user_email=user_email)
 
-@app.route("/admin/export")
-@login_required
-def admin_export():
-    require_admin()
-    start = request.args.get("start"); end = request.args.get("end"); user_email = request.args.get("email", "").strip().lower()
-    now_local = datetime.now(LOCAL_TZ)
-    default_end = now_local.date(); default_start = default_end - timedelta(days=13)
-    try:
-        start_date = datetime.fromisoformat(start).date() if start else default_start
-        end_date = datetime.fromisoformat(end).date() if end else default_end
-    except ValueError:
-        abort(400, "日付の形式が不正です。YYYY-MM-DD で指定してください。")
+def generate_csv(start_date, end_date, user_email=None):
+    """CSVデータを生成する共通関数"""
     start_utc = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=LOCAL_TZ).astimezone(timezone.utc)
     end_utc = datetime.combine(end_date, datetime.max.time()).replace(tzinfo=LOCAL_TZ).astimezone(timezone.utc)
-
+    
     q = Shift.query.join(User).filter(Shift.clock_in_at >= start_utc, Shift.clock_in_at <= end_utc)
     if user_email:
         q = q.filter(User.email == user_email)
     shifts = q.order_by(Shift.clock_in_at.asc()).all()
-
+    
     import csv
     from io import StringIO
     buf = StringIO()
@@ -410,11 +409,189 @@ def admin_export():
             s.clock_in_ip or "", s.clock_out_ip or "", s.clock_in_ua or "", s.clock_out_ua or "",
             len(s.breaks), brk_sec, f"{brk_sec//3600:02d}:{(brk_sec%3600)//60:02d}:{brk_sec%60:02d}",
         ])
-    csv_data = buf.getvalue().encode("utf-8-sig")
+    return buf.getvalue().encode("utf-8-sig"), len(shifts)
+
+@app.route("/admin/export")
+@login_required
+def admin_export():
+    require_admin()
+    start = request.args.get("start"); end = request.args.get("end"); user_email = request.args.get("email", "").strip().lower()
+    now_local = datetime.now(LOCAL_TZ)
+    default_end = now_local.date(); default_start = default_end - timedelta(days=13)
+    try:
+        start_date = datetime.fromisoformat(start).date() if start else default_start
+        end_date = datetime.fromisoformat(end).date() if end else default_end
+    except ValueError:
+        abort(400, "日付の形式が不正です。YYYY-MM-DD で指定してください。")
+    
+    csv_data, shift_count = generate_csv(start_date, end_date, user_email if user_email else None)
     filename = f"attendance_export_{start_date.isoformat()}_{end_date.isoformat()}.csv"
-    resp = make_response(csv_data); resp.headers["Content-Type"] = "text/csv; charset=utf-8"; resp.headers["Content-Disposition"] = f"attachment; filename={filename}"
-    log_audit("admin_export", target_type="shift", target_id=None, metadata_dict={"start": start_date.isoformat(), "end": end_date.isoformat(), "email": user_email})
+    resp = make_response(csv_data)
+    resp.headers["Content-Type"] = "text/csv; charset=utf-8"
+    resp.headers["Content-Disposition"] = f"attachment; filename={filename}"
+    log_audit("admin_export", target_type="shift", target_id=None, metadata_dict={"start": start_date.isoformat(), "end": end_date.isoformat(), "email": user_email, "shift_count": shift_count})
     return resp
+
+def send_csv_email(to_email, csv_data, start_date, end_date):
+    """CSVファイルをメールで送信"""
+    try:
+        smtp_host = os.getenv("SMTP_HOST", "localhost")
+        smtp_port = int(os.getenv("SMTP_PORT", "25"))
+        smtp_user = os.getenv("SMTP_USER", "")
+        smtp_password = os.getenv("SMTP_PASSWORD", "")
+        smtp_use_tls = env_bool("SMTP_USE_TLS", False)
+        
+        msg = MIMEMultipart()
+        msg["From"] = os.getenv("SMTP_FROM", smtp_user or "noreply@example.com")
+        msg["To"] = to_email
+        msg["Subject"] = f"出退勤データ CSV - {start_date.isoformat()} ～ {end_date.isoformat()}"
+        
+        body = f"""出退勤システムからの定期CSVエクスポートです。
+
+期間: {start_date.isoformat()} ～ {end_date.isoformat()}
+
+CSVファイルを添付しています。
+"""
+        msg.attach(MIMEText(body, "plain", "utf-8"))
+        
+        filename = f"attendance_export_{start_date.isoformat()}_{end_date.isoformat()}.csv"
+        attachment = MIMEBase("application", "octet-stream")
+        attachment.set_payload(csv_data)
+        encoders.encode_base64(attachment)
+        attachment.add_header("Content-Disposition", f"attachment; filename={filename}")
+        msg.attach(attachment)
+        
+        with smtplib.SMTP(smtp_host, smtp_port) as server:
+            if smtp_use_tls:
+                server.starttls()
+            if smtp_user and smtp_password:
+                server.login(smtp_user, smtp_password)
+            server.send_message(msg)
+        
+        app.logger.info(f"CSV email sent to {to_email}")
+        return True
+    except Exception as e:
+        app.logger.exception(f"Failed to send CSV email: {e}")
+        return False
+
+def scheduled_csv_export():
+    """定期CSVエクスポートのジョブ関数"""
+    if not CSV_EXPORT_EMAIL:
+        return
+    
+    with app.app_context():
+        now_local = datetime.now(LOCAL_TZ)
+        end_date = now_local.date()
+        start_date = end_date - timedelta(days=CSV_EXPORT_DAYS)
+        
+        try:
+            csv_data, shift_count = generate_csv(start_date, end_date)
+            send_csv_email(CSV_EXPORT_EMAIL, csv_data, start_date, end_date)
+            log_audit("scheduled_csv_export", target_type="system", target_id=None, 
+                     metadata_dict={"email": CSV_EXPORT_EMAIL, "start": start_date.isoformat(), 
+                                   "end": end_date.isoformat(), "shift_count": shift_count})
+        except Exception as e:
+            app.logger.exception(f"Scheduled CSV export failed: {e}")
+
+@app.route("/admin/shift/<int:shift_id>/edit", methods=["GET", "POST"])
+@login_required
+def admin_shift_edit(shift_id):
+    """出退勤データの編集"""
+    require_admin()
+    ensure_csrf()
+    
+    shift = Shift.query.get_or_404(shift_id)
+    
+    if request.method == "POST":
+        verify_csrf()
+        
+        # 変更前の値を保存（監査ログ用）
+        old_values = {
+            "clock_in_at": shift.clock_in_at.isoformat() if shift.clock_in_at else None,
+            "clock_out_at": shift.clock_out_at.isoformat() if shift.clock_out_at else None,
+        }
+        
+        # 新しい値を取得
+        clock_in_str = request.form.get("clock_in_at", "").strip()
+        clock_out_str = request.form.get("clock_out_at", "").strip()
+        
+        try:
+            # 日時文字列をパース（datetime-local形式: YYYY-MM-DDTHH:MM または YYYY-MM-DD HH:MM:SS）
+            if clock_in_str:
+                # datetime-local形式 (YYYY-MM-DDTHH:MM) を処理
+                if "T" in clock_in_str:
+                    clock_in_local = datetime.strptime(clock_in_str, "%Y-%m-%dT%H:%M")
+                else:
+                    clock_in_local = datetime.strptime(clock_in_str, "%Y-%m-%d %H:%M:%S")
+                shift.clock_in_at = clock_in_local.replace(tzinfo=LOCAL_TZ).astimezone(timezone.utc)
+            else:
+                shift.clock_in_at = None
+                
+            if clock_out_str:
+                # datetime-local形式 (YYYY-MM-DDTHH:MM) を処理
+                if "T" in clock_out_str:
+                    clock_out_local = datetime.strptime(clock_out_str, "%Y-%m-%dT%H:%M")
+                else:
+                    clock_out_local = datetime.strptime(clock_out_str, "%Y-%m-%d %H:%M:%S")
+                shift.clock_out_at = clock_out_local.replace(tzinfo=LOCAL_TZ).astimezone(timezone.utc)
+            else:
+                shift.clock_out_at = None
+            
+            db.session.commit()
+            
+            # 変更後の値を保存
+            new_values = {
+                "clock_in_at": shift.clock_in_at.isoformat() if shift.clock_in_at else None,
+                "clock_out_at": shift.clock_out_at.isoformat() if shift.clock_out_at else None,
+            }
+            
+            # 監査ログに記録（変更前後の値を含む）
+            log_audit("admin_shift_edit", target_type="shift", target_id=shift_id,
+                     metadata_dict={
+                         "user_email": shift.user.email,
+                         "old_values": old_values,
+                         "new_values": new_values,
+                     })
+            
+            flash("出退勤データを更新しました。", "success")
+            return redirect(url_for("admin"))
+        except ValueError as e:
+            flash(f"日時の形式が不正です: {e}", "error")
+        except Exception as e:
+            db.session.rollback()
+            app.logger.exception(f"Failed to update shift: {e}")
+            flash("更新に失敗しました。", "error")
+    
+    # GETリクエスト時は編集フォームを表示
+    clock_in_local = shift.clock_in_at.astimezone(LOCAL_TZ) if shift.clock_in_at else None
+    clock_out_local = shift.clock_out_at.astimezone(LOCAL_TZ) if shift.clock_out_at else None
+    
+    return render_template("shift_edit.html", shift=shift,
+                          clock_in_local=clock_in_local, clock_out_local=clock_out_local,
+                          LOCAL_TZ_NAME=str(LOCAL_TZ))
+
+@app.route("/admin/shift/<int:shift_id>", methods=["GET"])
+@login_required
+def admin_shift_detail(shift_id):
+    """出退勤データの詳細（JSON API）"""
+    require_admin()
+    shift = Shift.query.get_or_404(shift_id)
+    
+    clock_in_local = shift.clock_in_at.astimezone(LOCAL_TZ) if shift.clock_in_at else None
+    clock_out_local = shift.clock_out_at.astimezone(LOCAL_TZ) if shift.clock_out_at else None
+    
+    return jsonify({
+        "id": shift.id,
+        "user_email": shift.user.email,
+        "user_name": shift.user.name,
+        "clock_in_at": clock_in_local.strftime("%Y-%m-%d %H:%M:%S") if clock_in_local else None,
+        "clock_out_at": clock_out_local.strftime("%Y-%m-%d %H:%M:%S") if clock_out_local else None,
+        "clock_in_utc": shift.clock_in_at.isoformat() if shift.clock_in_at else None,
+        "clock_out_utc": shift.clock_out_at.isoformat() if shift.clock_out_at else None,
+        "clock_in_ip": shift.clock_in_ip,
+        "clock_out_ip": shift.clock_out_ip,
+        "worked_seconds": shift.worked_seconds(),
+    })
 
 @app.route("/healthz")
 def healthz():
@@ -427,6 +604,59 @@ def ensure_db():
 @app.context_processor
 def inject_globals():
     return {"current_user": current_user, "is_admin": (current_user.is_authenticated and current_user.is_admin()), "LOCAL_TZ_NAME": str(LOCAL_TZ), "ALLOW_DEV_LOGIN": ALLOW_DEV_LOGIN}
+
+# 定期CSV送信のスケジューラー初期化
+def init_scheduler():
+    """スケジューラーを初期化"""
+    if not CSV_EXPORT_EMAIL or not CSV_EXPORT_SCHEDULE:
+        return None
+    
+    from apscheduler.schedulers.background import BackgroundScheduler
+    from apscheduler.triggers.cron import CronTrigger
+    
+    scheduler = BackgroundScheduler()
+    
+    # スケジュール設定のパース
+    schedule_lower = CSV_EXPORT_SCHEDULE.lower().strip()
+    
+    if schedule_lower == "daily":
+        # 毎日 朝9時に実行
+        trigger = CronTrigger(hour=9, minute=0, timezone=LOCAL_TZ)
+    elif schedule_lower == "weekly":
+        # 毎週月曜日 朝9時に実行
+        trigger = CronTrigger(day_of_week="mon", hour=9, minute=0, timezone=LOCAL_TZ)
+    elif schedule_lower == "monthly":
+        # 毎月1日 朝9時に実行
+        trigger = CronTrigger(day=1, hour=9, minute=0, timezone=LOCAL_TZ)
+    elif " " in CSV_EXPORT_SCHEDULE and CSV_EXPORT_SCHEDULE.count(" ") >= 4:
+        # cron形式（例: "0 9 * * *" → 毎日9時）
+        try:
+            parts = CSV_EXPORT_SCHEDULE.split()
+            if len(parts) == 5:
+                # CronTriggerのパラメータ: minute, hour, day, month, day_of_week
+                trigger = CronTrigger(minute=parts[0], hour=parts[1], day=parts[2], month=parts[3], day_of_week=parts[4], timezone=LOCAL_TZ)
+            else:
+                app.logger.warning(f"Invalid cron format: {CSV_EXPORT_SCHEDULE}")
+                return None
+        except Exception as e:
+            app.logger.warning(f"Failed to parse cron schedule: {e}")
+            return None
+    else:
+        app.logger.warning(f"Unknown schedule format: {CSV_EXPORT_SCHEDULE}")
+        return None
+    
+    scheduler.add_job(func=scheduled_csv_export, trigger=trigger, id="csv_export_job", replace_existing=True)
+    scheduler.start()
+    app.logger.info(f"Scheduled CSV export initialized: {CSV_EXPORT_SCHEDULE} -> {CSV_EXPORT_EMAIL}")
+    return scheduler
+
+# アプリ起動時にスケジューラーを初期化
+_scheduler = None
+if CSV_EXPORT_EMAIL and CSV_EXPORT_SCHEDULE:
+    try:
+        _scheduler = init_scheduler()
+    except Exception as e:
+        app.logger.exception(f"Failed to initialize scheduler: {e}")
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")), debug=True)
