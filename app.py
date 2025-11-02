@@ -5,6 +5,7 @@ import hmac
 import hashlib
 import json
 from datetime import datetime, timezone, timedelta
+from collections import defaultdict
 from zoneinfo import ZoneInfo
 
 from flask import Flask, render_template, redirect, url_for, session, request, abort, flash, make_response, jsonify
@@ -46,6 +47,8 @@ CSV_EXPORT_SCHEDULE = os.getenv("CSV_EXPORT_SCHEDULE", "")  # 例: "daily" (毎�
 CSV_EXPORT_DAYS = int(os.getenv("CSV_EXPORT_DAYS", "30"))  # 過去何日分をエクスポートするか
 
 db = SQLAlchemy(app)
+
+WEEKDAY_JA = ["月", "火", "水", "木", "金", "土", "日"]
 
 login_manager = LoginManager(app)
 login_manager.login_view = "login"
@@ -122,6 +125,7 @@ class AuditLog(db.Model):
     __tablename__ = "audit_logs"
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True, index=True)
+    user = db.relationship("User", backref="audit_logs")
     action = db.Column(db.String(50), nullable=False)
     target_type = db.Column(db.String(50))
     target_id = db.Column(db.Integer)
@@ -194,7 +198,8 @@ def fmt_dt(dt):
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     local = dt.astimezone(LOCAL_TZ)
-    return local.strftime("%Y-%m-%d %H:%M:%S")
+    weekday = WEEKDAY_JA[local.weekday()]
+    return f"{local.year}年{local.month:02d}月{local.day:02d}日({weekday}) {local.hour:02d}:{local.minute:02d}:{local.second:02d}"
 
 @app.template_filter("fmt_hms")
 def fmt_hms(seconds):
@@ -203,6 +208,21 @@ def fmt_hms(seconds):
     m = (seconds % 3600) // 60
     s = seconds % 60
     return f"{h:02d}:{m:02d}:{s:02d}"
+
+@app.template_filter("fmt_date_ja")
+def fmt_date_ja(value):
+    if not value:
+        return "-"
+    if isinstance(value, datetime):
+        value = ensure_aware(value).astimezone(LOCAL_TZ).date()
+    elif isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value)
+            value = ensure_aware(parsed).astimezone(LOCAL_TZ).date()
+        except ValueError:
+            return value
+    weekday = WEEKDAY_JA[value.weekday()]
+    return f"{value.year}年{value.month:02d}月{value.day:02d}日({weekday})"
 
 @app.route("/login")
 def login():
@@ -378,7 +398,37 @@ def admin():
     if user_email:
         q = q.filter(User.email == user_email)
     shifts = q.order_by(Shift.clock_in_at.desc()).all()
-    return render_template("admin.html", shifts=shifts, start=start_date.isoformat(), end=end_date.isoformat(), user_email=user_email)
+
+    daily_buckets = defaultdict(lambda: {"seconds": 0, "count": 0})
+    for s in shifts:
+        if not s.clock_in_at:
+            continue
+        local_date = s.clock_in_at.astimezone(LOCAL_TZ).date()
+        bucket = daily_buckets[local_date]
+        bucket["seconds"] += s.worked_seconds()
+        bucket["count"] += 1
+
+    daily_totals = [
+        {
+            "date": date_key,
+            "seconds": bucket["seconds"],
+            "worked_hms": fmt_hms(bucket["seconds"]),
+            "count": bucket["count"],
+        }
+        for date_key, bucket in sorted(daily_buckets.items(), reverse=True)
+    ]
+
+    user_candidates = User.query.order_by(User.name.asc(), User.email.asc()).all()
+
+    return render_template(
+        "admin.html",
+        shifts=shifts,
+        start=start_date.isoformat(),
+        end=end_date.isoformat(),
+        user_email=user_email,
+        daily_totals=daily_totals,
+        user_candidates=user_candidates,
+    )
 
 def generate_csv(start_date, end_date, user_email=None):
     """CSVデータを生成する共通関数"""
@@ -586,12 +636,137 @@ def admin_shift_detail(shift_id):
         "user_name": shift.user.name,
         "clock_in_at": clock_in_local.strftime("%Y-%m-%d %H:%M:%S") if clock_in_local else None,
         "clock_out_at": clock_out_local.strftime("%Y-%m-%d %H:%M:%S") if clock_out_local else None,
+        "clock_in_form": clock_in_local.strftime("%Y-%m-%dT%H:%M") if clock_in_local else "",
+        "clock_out_form": clock_out_local.strftime("%Y-%m-%dT%H:%M") if clock_out_local else "",
         "clock_in_utc": shift.clock_in_at.isoformat() if shift.clock_in_at else None,
         "clock_out_utc": shift.clock_out_at.isoformat() if shift.clock_out_at else None,
         "clock_in_ip": shift.clock_in_ip,
         "clock_out_ip": shift.clock_out_ip,
         "worked_seconds": shift.worked_seconds(),
+        "worked_hms": fmt_hms(shift.worked_seconds()),
+        "break_count": len(shift.breaks),
+        "break_seconds": shift.total_break_seconds(),
+        "break_hms": fmt_hms(shift.total_break_seconds()),
     })
+
+def _parse_audit_filters(max_limit=500, default_limit=200):
+    action = request.args.get("action", "").strip()
+    email = (request.args.get("email", "") or "").strip().lower()
+    try:
+        limit = int(request.args.get("limit", str(default_limit)))
+    except ValueError:
+        limit = default_limit
+    limit = max(1, min(limit, max_limit))
+    return action, email, limit
+
+def _audit_log_query(action, email):
+    query = AuditLog.query.order_by(AuditLog.created_at.desc())
+    if action:
+        query = query.filter(AuditLog.action == action)
+    if email:
+        query = query.join(User).filter(db.func.lower(User.email) == email)
+    return query
+
+@app.route("/admin/audit")
+@login_required
+def admin_audit():
+    """監査ログの閲覧"""
+    require_admin()
+    ensure_csrf()
+
+    action, email, limit = _parse_audit_filters()
+    query = _audit_log_query(action, email)
+    logs = query.limit(limit).all()
+    action_rows = db.session.query(AuditLog.action).distinct().order_by(AuditLog.action.asc()).all()
+    action_choices = [row[0] for row in action_rows]
+
+    log_entries = []
+    for log in logs:
+        try:
+            metadata = json.loads(log.metadata_json) if log.metadata_json else {}
+        except Exception:
+            metadata = {"raw": log.metadata_json}
+        log_entries.append({"log": log, "metadata": metadata})
+
+    return render_template(
+        "admin_audit.html",
+        log_entries=log_entries,
+        action_choices=action_choices,
+        selected_action=action,
+        selected_email=email,
+        limit=limit,
+    )
+
+@app.route("/admin/audit/export")
+@login_required
+def admin_audit_export():
+    """監査ログのCSVエクスポート"""
+    require_admin()
+    action, email, limit = _parse_audit_filters(max_limit=5000, default_limit=1000)
+    query = _audit_log_query(action, email)
+    logs = query.limit(limit).all()
+
+    import csv
+    from io import StringIO
+
+    buf = StringIO()
+    writer = csv.writer(buf)
+    writer.writerow([
+        "created_at_local",
+        "created_at_utc",
+        "action",
+        "user_email",
+        "user_name",
+        "target_type",
+        "target_id",
+        "ip",
+        "user_agent",
+        "metadata_json",
+        "signature",
+    ])
+
+    for log in logs:
+        local_ts = log.created_at.astimezone(LOCAL_TZ) if log.created_at else None
+        created_local = local_ts.strftime("%Y-%m-%d %H:%M:%S") if local_ts else ""
+        created_utc = log.created_at.isoformat() if log.created_at else ""
+        try:
+            metadata = json.loads(log.metadata_json) if log.metadata_json else {}
+        except Exception:
+            metadata = {"raw": log.metadata_json}
+        metadata_str = json.dumps(metadata, ensure_ascii=False, separators=(",", ":")) if metadata else ""
+        writer.writerow([
+            created_local,
+            created_utc,
+            log.action,
+            log.user.email if log.user else "",
+            log.user.name if log.user else "",
+            log.target_type or "",
+            log.target_id or "",
+            log.ip or "",
+            log.user_agent or "",
+            metadata_str,
+            log.signature or "",
+        ])
+
+    csv_data = buf.getvalue().encode("utf-8-sig")
+    filename = f"audit_export_{datetime.now(LOCAL_TZ).strftime('%Y%m%d_%H%M%S')}.csv"
+    resp = make_response(csv_data)
+    resp.headers["Content-Type"] = "text/csv; charset=utf-8"
+    resp.headers["Content-Disposition"] = f"attachment; filename={filename}"
+
+    log_audit(
+        "admin_audit_export",
+        target_type="audit_log",
+        target_id=None,
+        metadata_dict={
+            "action": action or None,
+            "email": email or None,
+            "limit": limit,
+            "count": len(logs),
+        },
+    )
+
+    return resp
 
 @app.route("/healthz")
 def healthz():

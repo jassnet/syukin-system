@@ -1,0 +1,104 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="card shadow-sm">
+  <div class="card-body">
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2">
+      <div>
+        <h2 class="h5 mb-0">監査ログ</h2>
+        <p class="text-muted small mb-0">最新の操作履歴を上から表示しています。</p>
+      </div>
+      <div class="d-flex gap-2 flex-wrap">
+        <a href="{{ url_for('admin_audit_export', action=selected_action or None, email=selected_email or None, limit=limit) }}" class="btn btn-outline-primary">CSVエクスポート</a>
+        <a href="{{ url_for('admin') }}" class="btn btn-outline-secondary">管理画面へ戻る</a>
+      </div>
+    </div>
+
+    <form class="row row-cols-1 row-cols-md-5 g-3 align-items-end mt-3" method="get">
+      <div class="col">
+        <label class="form-label">アクション</label>
+        <select class="form-select" name="action">
+          <option value="">すべて</option>
+          {% for action_name in action_choices %}
+          <option value="{{ action_name }}" {% if action_name == selected_action %}selected{% endif %}>{{ action_name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col">
+        <label class="form-label">ユーザーメール</label>
+        <input type="email" class="form-control" name="email" value="{{ selected_email }}" placeholder="name@example.com">
+      </div>
+      <div class="col">
+        <label class="form-label">最大件数</label>
+        <input type="number" class="form-control" name="limit" min="10" max="500" value="{{ limit }}">
+      </div>
+      <div class="col">
+        <button class="btn btn-primary">絞り込み</button>
+      </div>
+      <div class="col">
+        <a href="{{ url_for('admin_audit') }}" class="btn btn-outline-secondary">リセット</a>
+      </div>
+    </form>
+
+    <div class="table-responsive mt-4">
+      <table class="table table-sm align-middle">
+        <thead class="table-light">
+          <tr>
+            <th scope="col">日時</th>
+            <th scope="col">ユーザー</th>
+            <th scope="col">アクション</th>
+            <th scope="col">対象</th>
+            <th scope="col">IP / UA</th>
+            <th scope="col">詳細</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% if log_entries %}
+            {% for entry in log_entries %}
+            {% set log = entry.log %}
+            {% set metadata = entry.metadata %}
+            <tr>
+              <td>{{ log.created_at|fmt_dt }}</td>
+              <td>
+                {% if log.user %}
+                  <div class="fw-semibold">{{ log.user.name or log.user.email }}</div>
+                  <div class="text-muted small">{{ log.user.email }}</div>
+                {% else %}
+                  <span class="text-muted small">(system)</span>
+                {% endif %}
+              </td>
+              <td>
+                <span class="badge text-bg-secondary">{{ log.action }}</span>
+              </td>
+              <td>
+                <div>{{ log.target_type or '-' }}</div>
+                <div class="text-muted small">ID: {{ log.target_id or '-' }}</div>
+              </td>
+              <td class="small">
+                <div>{{ log.ip or '-' }}</div>
+                <div class="text-muted">{{ log.user_agent or '-' }}</div>
+              </td>
+              <td class="small">
+                {% if metadata %}
+                  <details>
+                    <summary class="text-decoration-underline">JSON</summary>
+                    <pre class="mb-0 small">{{ metadata | tojson(indent=2) }}</pre>
+                  </details>
+                {% else %}
+                  <span class="text-muted">-</span>
+                {% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          {% else %}
+          <tr>
+            <td colspan="6" class="text-muted">該当する監査ログがありません。</td>
+          </tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+
+    <p class="text-muted small mb-0">* すべての時刻は {{ LOCAL_TZ_NAME }} 表示です。署名ハッシュはDB上で確認できます。</p>
+  </div>
+</div>
+{% endblock %}

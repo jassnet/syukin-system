@@ -2,61 +2,393 @@
 {% block content %}
 <div class="card shadow-sm">
   <div class="card-body">
-    <h2 class="h5">管理 - 出退勤記録</h2>
-    <form class="row row-cols-lg-auto g-2 align-items-end mt-2">
-      <div class="col-12">
+    <div class="d-flex flex-wrap align-items-center justify-content-between gap-2">
+      <div>
+        <h2 class="h5 mb-0">管理 - 出退勤記録</h2>
+        <div class="text-muted small">表示タイムゾーン: {{ LOCAL_TZ_NAME }}</div>
+      </div>
+      <div class="d-flex gap-2 flex-wrap">
+        <a class="btn btn-outline-primary" href="{{ url_for('admin_audit') }}">監査ログ</a>
+        <a class="btn btn-outline-secondary" href="{{ url_for('admin_export', start=start, end=end, email=user_email) }}">CSVエクスポート</a>
+      </div>
+    </div>
+
+    <form class="row row-cols-1 row-cols-md-4 g-3 align-items-end mt-3" method="get">
+      <div class="col">
         <label class="form-label">開始日</label>
         <input type="date" class="form-control" name="start" value="{{ start }}">
       </div>
-      <div class="col-12">
+      <div class="col">
         <label class="form-label">終了日</label>
         <input type="date" class="form-control" name="end" value="{{ end }}">
       </div>
-      <div class="col-12">
+      <div class="col">
         <label class="form-label">メール（任意）</label>
-        <input type="email" class="form-control" name="email" value="{{ user_email }}">
+        <input type="email" class="form-control" name="email" value="{{ user_email }}" list="admin-email-list" placeholder="name@example.com">
+        <datalist id="admin-email-list">
+          {% for user in user_candidates %}
+          <option value="{{ user.email }}">{{ user.name or user.email }}</option>
+          {% endfor %}
+        </datalist>
       </div>
-      <div class="col-12">
-        <button class="btn btn-primary">適用</button>
-        <a class="btn btn-outline-secondary" href="{{ url_for('admin_export', start=start, end=end, email=user_email) }}">CSVエクスポート</a>
+      <div class="col d-flex gap-2">
+        <button class="btn btn-primary flex-grow-1">表示更新</button>
+        <a class="btn btn-outline-secondary" href="{{ url_for('admin') }}">リセット</a>
       </div>
     </form>
 
-    <div class="table-responsive mt-3">
+    {% set ns = namespace(total_seconds=0, total_shifts=0) %}
+    {% for day in daily_totals %}
+      {% set ns.total_seconds = ns.total_seconds + day.seconds %}
+      {% set ns.total_shifts = ns.total_shifts + day.count %}
+    {% endfor %}
+    <div class="mt-4">
+      <div class="d-flex flex-wrap align-items-baseline justify-content-between gap-2 mb-2">
+        <h3 class="h6 mb-0">日別集計</h3>
+        <div class="text-muted small">
+          合計実働: {{ ns.total_seconds|fmt_hms }} ／ シフト数: {{ ns.total_shifts }}
+        </div>
+      </div>
+      {% if daily_totals %}
+      <div class="table-responsive">
+        <table class="table table-sm align-middle mb-0" aria-label="日別集計">
+          <thead class="table-light">
+            <tr>
+              <th scope="col">日付</th>
+              <th scope="col">シフト数</th>
+              <th scope="col">実働合計</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for day in daily_totals %}
+            <tr>
+              <td>{{ day.date|fmt_date_ja }}</td>
+              <td>{{ day.count }}</td>
+              <td>{{ day.worked_hms }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <div class="alert alert-light border mb-0">条件に一致するシフトがありません。</div>
+      {% endif %}
+    </div>
+
+    <div class="table-responsive mt-4">
       <table class="table table-sm align-middle">
-        <thead>
+        <thead class="table-light">
           <tr>
             <th>ユーザー</th>
             <th>出勤</th>
             <th>退勤</th>
-            <th>休憩(数/合計)</th>
-            <th>実働</th>
+            <th>実働 / 休憩</th>
             <th>IP (in/out)</th>
             <th>操作</th>
           </tr>
         </thead>
         <tbody>
           {% for s in shifts %}
-          <tr>
-            <td>{{ s.user.name }}<br><span class="text-muted small">{{ s.user.email }}</span></td>
-            <td>{{ s.clock_in_at|fmt_dt }}</td>
+          <tr class="{% if s.is_open %}table-warning{% endif %}">
+            <td>
+              <div class="fw-semibold">{{ s.user.name or s.user.email }}</div>
+              <div class="text-muted small">{{ s.user.email }}</div>
+            </td>
+            <td>
+              <div>{{ s.clock_in_at|fmt_dt }}</div>
+              {% if s.is_open %}<span class="badge bg-warning-subtle text-warning-emphasis border">出勤中</span>{% endif %}
+            </td>
             <td>{{ s.clock_out_at|fmt_dt }}</td>
-            <td>{{ s.breaks|length }} / {{ s.total_break_seconds()|fmt_hms }}</td>
-            <td>{{ s.worked_seconds()|fmt_hms }}</td>
-            <td class="small">{{ s.clock_in_ip or '-' }}<br>{{ s.clock_out_ip or '-' }}</td>
-            <td><a href="{{ url_for('admin_shift_edit', shift_id=s.id) }}" class="btn btn-sm btn-outline-primary">編集</a></td>
+            <td>
+              <div class="fw-semibold">{{ s.worked_seconds()|fmt_hms }}</div>
+              <div class="text-muted small">休憩 {{ s.breaks|length }} / {{ s.total_break_seconds()|fmt_hms }}</div>
+            </td>
+            <td class="small">
+              <div>{{ s.clock_in_ip or '-' }}</div>
+              <div>{{ s.clock_out_ip or '-' }}</div>
+            </td>
+            <td>
+              <div class="d-flex flex-column gap-2">
+                <button type="button" class="btn btn-sm btn-outline-primary" data-shift-edit="{{ s.id }}" data-detail-url="{{ url_for('admin_shift_detail', shift_id=s.id) }}" data-action-url="{{ url_for('admin_shift_edit', shift_id=s.id) }}">
+                  編集
+                </button>
+                <a href="{{ url_for('admin_shift_edit', shift_id=s.id) }}" class="btn btn-sm btn-outline-secondary">詳細画面</a>
+              </div>
+            </td>
           </tr>
           {% else %}
-          <tr><td colspan="7" class="text-muted">該当なし</td></tr>
+          <tr><td colspan="6" class="text-muted">該当なし</td></tr>
           {% endfor %}
         </tbody>
       </table>
     </div>
 
-    <p class="text-muted small mb-0">
+    <p class="text-muted small mb-0 mt-3">
       * 保存はUTC、表示は {{ LOCAL_TZ_NAME }}。<br>
       * 各操作は監査ログ（IP/UA/HMAC）に記録されます。
     </p>
   </div>
 </div>
+
+<div class="modal fade" id="shiftEditModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <form method="POST" id="shiftEditForm">
+        <div class="modal-header">
+          <h5 class="modal-title">シフト編集</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="閉じる"></button>
+        </div>
+        <div class="modal-body">
+          <input type="hidden" name="csrf_token" value="{{ session.csrf_token }}">
+          <div class="mb-3">
+            <div class="fw-semibold" id="shiftEditUser">&nbsp;</div>
+            <div class="text-muted small" id="shiftEditSummary">&nbsp;</div>
+          </div>
+          <div class="border rounded p-3 mb-3">
+            <div class="row g-3">
+              <div class="col-md-6">
+                <label class="form-label">出勤時刻 ({{ LOCAL_TZ_NAME }})</label>
+                <div class="d-flex gap-2">
+                  <input type="datetime-local" class="form-control" id="shiftEditClockIn" name="clock_in_at" step="60">
+                  <button type="button" class="btn btn-outline-secondary btn-sm" data-clear-target="#shiftEditClockIn">未設定</button>
+                </div>
+                <div class="btn-group btn-group-sm flex-wrap mt-2" role="group" aria-label="出勤時刻ショートカット">
+                  <button type="button" class="btn btn-outline-secondary" data-set-now="#shiftEditClockIn">現在</button>
+                  <button type="button" class="btn btn-outline-secondary" data-adjust-target="#shiftEditClockIn" data-adjust-minutes="-15">-15分</button>
+                  <button type="button" class="btn btn-outline-secondary" data-adjust-target="#shiftEditClockIn" data-adjust-minutes="15">+15分</button>
+                  <button type="button" class="btn btn-outline-secondary" data-round-target="#shiftEditClockIn" data-round-minutes="5">5分単位に丸める</button>
+                </div>
+                <div class="form-text" id="shiftEditClockInMeta"></div>
+              </div>
+              <div class="col-md-6">
+                <label class="form-label">退勤時刻 ({{ LOCAL_TZ_NAME }})</label>
+                <div class="d-flex gap-2">
+                  <input type="datetime-local" class="form-control" id="shiftEditClockOut" name="clock_out_at" step="60">
+                  <button type="button" class="btn btn-outline-secondary btn-sm" data-clear-target="#shiftEditClockOut">未設定</button>
+                </div>
+                <div class="btn-group btn-group-sm flex-wrap mt-2" role="group" aria-label="退勤時刻ショートカット">
+                  <button type="button" class="btn btn-outline-secondary" data-set-now="#shiftEditClockOut">現在</button>
+                  <button type="button" class="btn btn-outline-secondary" data-adjust-target="#shiftEditClockOut" data-adjust-minutes="-15">-15分</button>
+                  <button type="button" class="btn btn-outline-secondary" data-adjust-target="#shiftEditClockOut" data-adjust-minutes="15">+15分</button>
+                  <button type="button" class="btn btn-outline-secondary" data-copy-from="#shiftEditClockIn" data-copy-target="#shiftEditClockOut">出勤と同じ</button>
+                  <button type="button" class="btn btn-outline-secondary" data-round-target="#shiftEditClockOut" data-round-minutes="5">5分単位に丸める</button>
+                </div>
+                <div class="form-text" id="shiftEditClockOutMeta"></div>
+              </div>
+            </div>
+          </div>
+          <div class="row g-3 mb-3">
+            <div class="col-md-4">
+              <div class="p-3 rounded bg-body-tertiary h-100">
+                <div class="text-muted small">実働時間</div>
+                <div class="fs-5" id="shiftEditWorked">--:--:--</div>
+              </div>
+            </div>
+            <div class="col-md-4">
+              <div class="p-3 rounded bg-body-tertiary h-100">
+                <div class="text-muted small">休憩合計</div>
+                <div class="fs-5" id="shiftEditBreaks">--:--:--</div>
+                <div class="text-muted small" id="shiftEditBreakCount"></div>
+              </div>
+            </div>
+            <div class="col-md-4">
+              <div class="p-3 rounded bg-body-tertiary h-100">
+                <div class="text-muted small">IP</div>
+                <div class="small" id="shiftEditIp"></div>
+              </div>
+            </div>
+          </div>
+          <div class="alert alert-danger d-none" id="shiftEditError" role="alert"></div>
+          <div class="text-center py-3 d-none" data-loading>
+            <div class="spinner-border" role="status"></div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">閉じる</button>
+          <button type="submit" class="btn btn-primary">更新</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+  const modalEl = document.getElementById('shiftEditModal');
+  if (!modalEl) {
+    return;
+  }
+  const modal = new bootstrap.Modal(modalEl);
+  const form = document.getElementById('shiftEditForm');
+  const clockInInput = document.getElementById('shiftEditClockIn');
+  const clockOutInput = document.getElementById('shiftEditClockOut');
+  const userLabel = document.getElementById('shiftEditUser');
+  const summaryLabel = document.getElementById('shiftEditSummary');
+  const workedLabel = document.getElementById('shiftEditWorked');
+  const breaksLabel = document.getElementById('shiftEditBreaks');
+  const breakCountLabel = document.getElementById('shiftEditBreakCount');
+  const ipLabel = document.getElementById('shiftEditIp');
+  const errorBox = document.getElementById('shiftEditError');
+  const loadingBox = modalEl.querySelector('[data-loading]');
+  const clockInMeta = document.getElementById('shiftEditClockInMeta');
+  const clockOutMeta = document.getElementById('shiftEditClockOutMeta');
+
+  const toggleLoading = (state) => {
+    if (!loadingBox) return;
+    loadingBox.classList.toggle('d-none', !state);
+  };
+
+  const pad2 = (num) => String(num).padStart(2, '0');
+
+  const formatForInput = (date) => {
+    if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
+      return '';
+    }
+    return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}T${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
+  };
+
+  const parseInputValue = (value) => {
+    if (!value) return null;
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  };
+
+  const setInputDate = (input, dateObj) => {
+    if (!input || !(dateObj instanceof Date) || Number.isNaN(dateObj.getTime())) {
+      return;
+    }
+    input.value = formatForInput(dateObj);
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  };
+
+  const adjustInputMinutes = (input, minutes) => {
+    if (!input) return;
+    const base = parseInputValue(input.value) || new Date();
+    base.setMinutes(base.getMinutes() + minutes);
+    setInputDate(input, base);
+  };
+
+  const roundInputMinutes = (input, stepMinutes) => {
+    if (!input || !stepMinutes) return;
+    const base = parseInputValue(input.value) || new Date();
+    const ms = base.getTime();
+    const stepMs = stepMinutes * 60 * 1000;
+    const rounded = new Date(Math.round(ms / stepMs) * stepMs);
+    setInputDate(input, rounded);
+  };
+
+  const buildMetaText = (local, utc) => {
+    if (!local && !utc) {
+      return '未設定';
+    }
+    if (local && utc) {
+      return `${local} (UTC: ${utc})`;
+    }
+    return local || `UTC: ${utc}`;
+  };
+
+  const showError = (message) => {
+    errorBox.textContent = message;
+    errorBox.classList.toggle('d-none', !message);
+  };
+
+  modalEl.querySelectorAll('[data-clear-target]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const target = modalEl.querySelector(btn.getAttribute('data-clear-target'));
+      if (target) {
+        target.value = '';
+        target.dispatchEvent(new Event('change', { bubbles: true }));
+        target.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    });
+  });
+
+  modalEl.querySelectorAll('[data-set-now]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const target = modalEl.querySelector(btn.getAttribute('data-set-now'));
+      if (target) {
+        setInputDate(target, new Date());
+      }
+    });
+  });
+
+  modalEl.querySelectorAll('[data-adjust-minutes]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const selector = btn.getAttribute('data-adjust-target');
+      const target = modalEl.querySelector(selector);
+      if (!target) return;
+      const minutes = Number(btn.getAttribute('data-adjust-minutes'));
+      if (Number.isNaN(minutes)) return;
+      adjustInputMinutes(target, minutes);
+    });
+  });
+
+  modalEl.querySelectorAll('[data-round-target]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const target = modalEl.querySelector(btn.getAttribute('data-round-target'));
+      if (!target) return;
+      const minutes = Number(btn.getAttribute('data-round-minutes'));
+      if (!minutes || Number.isNaN(minutes)) return;
+      roundInputMinutes(target, minutes);
+    });
+  });
+
+  modalEl.querySelectorAll('[data-copy-from]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const source = modalEl.querySelector(btn.getAttribute('data-copy-from'));
+      const target = modalEl.querySelector(btn.getAttribute('data-copy-target'));
+      if (!source || !target) return;
+      const parsed = parseInputValue(source.value);
+      if (!parsed) return;
+      setInputDate(target, parsed);
+    });
+  });
+
+  document.querySelectorAll('[data-shift-edit]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const detailUrl = btn.getAttribute('data-detail-url');
+      const actionUrl = btn.getAttribute('data-action-url');
+      form.setAttribute('action', actionUrl);
+      clockInInput.value = '';
+      clockOutInput.value = '';
+      userLabel.textContent = '読み込み中…';
+      summaryLabel.textContent = '';
+      workedLabel.textContent = '--:--:--';
+      breaksLabel.textContent = '--:--:--';
+      breakCountLabel.textContent = '';
+      ipLabel.textContent = '';
+      clockInMeta.textContent = '';
+      clockOutMeta.textContent = '';
+      showError('');
+      toggleLoading(true);
+      modal.show();
+      try {
+        const response = await fetch(detailUrl, { headers: { 'Accept': 'application/json' } });
+        if (!response.ok) {
+          throw new Error('データの取得に失敗しました');
+        }
+        const data = await response.json();
+        userLabel.textContent = `${data.user_name || data.user_email || ''}`;
+        const summaryParts = [];
+        if (data.user_email) summaryParts.push(`メール: ${data.user_email}`);
+        if (data.worked_hms) summaryParts.push(`実働: ${data.worked_hms}`);
+        summaryLabel.textContent = summaryParts.join(' ／ ');
+        clockInInput.value = data.clock_in_form || '';
+        clockOutInput.value = data.clock_out_form || '';
+        workedLabel.textContent = data.worked_hms || '--:--:--';
+        breaksLabel.textContent = data.break_hms || '--:--:--';
+        breakCountLabel.textContent = data.break_count !== undefined ? `休憩回数: ${data.break_count}` : '';
+        ipLabel.innerHTML = `${data.clock_in_ip || '-'}<br>${data.clock_out_ip || '-'}`;
+        clockInMeta.textContent = buildMetaText(data.clock_in_at, data.clock_in_utc);
+        clockOutMeta.textContent = buildMetaText(data.clock_out_at, data.clock_out_utc);
+      } catch (err) {
+        showError(err.message);
+      } finally {
+        toggleLoading(false);
+      }
+    });
+  });
+});
+</script>
 {% endblock %}

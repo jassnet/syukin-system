@@ -1,2 +1,10 @@
 /* minimal tweaks */
-table td, table th { white-space: nowrap; }
+.table-nowrap td,
+.table-nowrap th {
+  white-space: nowrap;
+}
+
+table td,
+table th {
+  vertical-align: middle;
+}
