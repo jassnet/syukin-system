@@ -32,15 +32,15 @@
         <input type="number" class="form-control" name="limit" min="10" max="500" value="{{ limit }}">
       </div>
       <div class="col">
-        <button class="btn btn-primary">絞り込み</button>
+        <button class="btn btn-primary w-100 w-md-auto">絞り込み</button>
       </div>
       <div class="col">
-        <a href="{{ url_for('admin_audit') }}" class="btn btn-outline-secondary">リセット</a>
+        <a href="{{ url_for('admin_audit') }}" class="btn btn-outline-secondary w-100 w-md-auto">リセット</a>
       </div>
     </form>
 
     <div class="table-responsive mt-4">
-      <table class="table table-sm align-middle">
+      <table class="table table-sm align-middle table-stack" aria-label="監査ログ一覧">
         <thead class="table-light">
           <tr>
             <th scope="col">日時</th>
@@ -57,8 +57,8 @@
             {% set log = entry.log %}
             {% set metadata = entry.metadata %}
             <tr>
-              <td>{{ log.created_at|fmt_dt }}</td>
-              <td>
+              <td data-label="日時">{{ log.created_at|fmt_dt }}</td>
+              <td data-label="ユーザー">
                 {% if log.user %}
                   <div class="fw-semibold">{{ log.user.name or log.user.email }}</div>
                   <div class="text-muted small">{{ log.user.email }}</div>
@@ -66,18 +66,18 @@
                   <span class="text-muted small">(system)</span>
                 {% endif %}
               </td>
-              <td>
+              <td data-label="アクション">
                 <span class="badge text-bg-secondary">{{ log.action }}</span>
               </td>
-              <td>
+              <td data-label="対象">
                 <div>{{ log.target_type or '-' }}</div>
                 <div class="text-muted small">ID: {{ log.target_id or '-' }}</div>
               </td>
-              <td class="small">
+              <td class="small" data-label="IP / UA">
                 <div>{{ log.ip or '-' }}</div>
                 <div class="text-muted">{{ log.user_agent or '-' }}</div>
               </td>
-              <td class="small">
+              <td class="small" data-label="詳細">
                 {% if metadata %}
                   <details>
                     <summary class="text-decoration-underline">JSON</summary>

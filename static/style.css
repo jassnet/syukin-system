@@ -8,3 +8,73 @@ table td,
 table th {
   vertical-align: middle;
 }
+
+@media (max-width: 767.98px) {
+  .table-responsive {
+    overflow: visible;
+  }
+
+  .table-stack thead {
+    display: none;
+  }
+
+  .table-stack tbody {
+    display: block;
+  }
+
+  .table-stack tbody tr {
+    display: block;
+    margin-bottom: 1rem;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    border-radius: 0.75rem;
+    padding: 0.75rem 1rem;
+    background-color: var(--bs-body-bg, #fff);
+    box-shadow: 0 0.25rem 0.5rem rgba(0, 0, 0, 0.04);
+  }
+
+  .table-stack tbody tr:last-child {
+    margin-bottom: 0;
+  }
+
+  .table-stack tbody tr.table-warning {
+    border-color: rgba(255, 193, 7, 0.45);
+    background-color: rgba(255, 243, 205, 0.6);
+  }
+
+  .table-stack tbody td {
+    display: block;
+    padding: 0.25rem 0;
+  }
+
+  .table-stack tbody td::before {
+    content: attr(data-label);
+    display: block;
+    font-weight: 600;
+    font-size: 0.85rem;
+    color: #6c757d;
+    margin-bottom: 0.25rem;
+  }
+
+  .table-stack tbody td > *:not(.badge):not(.btn):not(.d-flex):not(.btn-group) {
+    max-width: 100%;
+  }
+
+  .table-stack tbody td .d-flex,
+  .table-stack tbody td .btn-group {
+    flex-wrap: wrap;
+    gap: 0.25rem;
+  }
+
+  .table-stack tbody td .btn {
+    width: 100%;
+  }
+
+  .table-stack tbody td .btn.btn-sm {
+    padding-top: 0.5rem;
+    padding-bottom: 0.5rem;
+  }
+
+  .table-stack tbody td .badge {
+    width: fit-content;
+  }
+}

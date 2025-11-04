@@ -135,6 +135,46 @@ class AuditLog(db.Model):
     created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     signature = db.Column(db.String(128))
 
+class SystemConfig(db.Model):
+    __tablename__ = "system_configs"
+    id = db.Column(db.Integer, primary_key=True)
+    key = db.Column(db.String(100), unique=True, nullable=False, index=True)
+    value = db.Column(db.Text)
+    updated_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    updated_by = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+    
+    @staticmethod
+    def get(key, default=None):
+        """設定値を取得（環境変数をフォールバック）"""
+        config = SystemConfig.query.filter_by(key=key).first()
+        if config and config.value:
+            return config.value
+        # 環境変数から取得（後方互換性のため）
+        return os.getenv(key, default)
+    
+    @staticmethod
+    def set(key, value, user_id=None):
+        """設定値を保存"""
+        config = SystemConfig.query.filter_by(key=key).first()
+        if config:
+            config.value = value
+            config.updated_at = datetime.now(timezone.utc)
+            config.updated_by = user_id
+        else:
+            config = SystemConfig(key=key, value=value, updated_by=user_id)
+            db.session.add(config)
+        db.session.commit()
+        return config
+    
+    @staticmethod
+    def get_all():
+        """全ての設定を辞書形式で取得"""
+        configs = SystemConfig.query.all()
+        result = {}
+        for config in configs:
+            result[config.key] = config.value
+        return result
+
 def client_ip():
     xff = request.headers.get("X-Forwarded-For")
     if xff:
@@ -485,14 +525,16 @@ def admin_export():
 def send_csv_email(to_email, csv_data, start_date, end_date):
     """CSVファイルをメールで送信"""
     try:
-        smtp_host = os.getenv("SMTP_HOST", "localhost")
-        smtp_port = int(os.getenv("SMTP_PORT", "25"))
-        smtp_user = os.getenv("SMTP_USER", "")
-        smtp_password = os.getenv("SMTP_PASSWORD", "")
-        smtp_use_tls = env_bool("SMTP_USE_TLS", False)
+        smtp_host = SystemConfig.get("SMTP_HOST", os.getenv("SMTP_HOST", "localhost"))
+        smtp_port = int(SystemConfig.get("SMTP_PORT", os.getenv("SMTP_PORT", "25")))
+        smtp_user = SystemConfig.get("SMTP_USER", os.getenv("SMTP_USER", ""))
+        smtp_password = SystemConfig.get("SMTP_PASSWORD", os.getenv("SMTP_PASSWORD", ""))
+        smtp_use_tls_str = SystemConfig.get("SMTP_USE_TLS", os.getenv("SMTP_USE_TLS", "false"))
+        smtp_use_tls = smtp_use_tls_str.lower() in ("true", "1", "yes", "on")
         
         msg = MIMEMultipart()
-        msg["From"] = os.getenv("SMTP_FROM", smtp_user or "noreply@example.com")
+        smtp_from = SystemConfig.get("SMTP_FROM", os.getenv("SMTP_FROM", smtp_user or "noreply@example.com"))
+        msg["From"] = smtp_from
         msg["To"] = to_email
         msg["Subject"] = f"出退勤データ CSV - {start_date.isoformat()} ～ {end_date.isoformat()}"
         
@@ -524,21 +566,29 @@ CSVファイルを添付しています。
         app.logger.exception(f"Failed to send CSV email: {e}")
         return False
 
+def get_csv_export_config():
+    """CSVエクスポート設定を取得（DB優先、環境変数フォールバック）"""
+    email = SystemConfig.get("CSV_EXPORT_EMAIL", os.getenv("CSV_EXPORT_EMAIL", "").strip())
+    schedule = SystemConfig.get("CSV_EXPORT_SCHEDULE", os.getenv("CSV_EXPORT_SCHEDULE", ""))
+    days = int(SystemConfig.get("CSV_EXPORT_DAYS", os.getenv("CSV_EXPORT_DAYS", "30")))
+    return email, schedule, days
+
 def scheduled_csv_export():
     """定期CSVエクスポートのジョブ関数"""
-    if not CSV_EXPORT_EMAIL:
-        return
-    
     with app.app_context():
+        email, schedule, days = get_csv_export_config()
+        if not email:
+            return
+        
         now_local = datetime.now(LOCAL_TZ)
         end_date = now_local.date()
-        start_date = end_date - timedelta(days=CSV_EXPORT_DAYS)
+        start_date = end_date - timedelta(days=days)
         
         try:
             csv_data, shift_count = generate_csv(start_date, end_date)
-            send_csv_email(CSV_EXPORT_EMAIL, csv_data, start_date, end_date)
+            send_csv_email(email, csv_data, start_date, end_date)
             log_audit("scheduled_csv_export", target_type="system", target_id=None, 
-                     metadata_dict={"email": CSV_EXPORT_EMAIL, "start": start_date.isoformat(), 
+                     metadata_dict={"email": email, "start": start_date.isoformat(), 
                                    "end": end_date.isoformat(), "shift_count": shift_count})
         except Exception as e:
             app.logger.exception(f"Scheduled CSV export failed: {e}")
@@ -768,6 +818,85 @@ def admin_audit_export():
 
     return resp
 
+@app.route("/admin/settings", methods=["GET", "POST"])
+@login_required
+def admin_settings():
+    """システム設定ページ"""
+    require_admin()
+    ensure_csrf()
+    
+    if request.method == "POST":
+        verify_csrf()
+        
+        # CSVエクスポート設定を更新
+        csv_email = request.form.get("csv_export_email", "").strip()
+        # スケジュール値はselectまたはcron入力から取得
+        csv_schedule = request.form.get("csv_export_schedule", "").strip()
+        if not csv_schedule:
+            # フォールバック: カスタムcron形式が送られてきた場合
+            csv_schedule = request.form.get("csv_export_schedule_cron", "").strip()
+        csv_days = request.form.get("csv_export_days", "30").strip()
+        smtp_host = request.form.get("smtp_host", "").strip()
+        smtp_port = request.form.get("smtp_port", "25").strip()
+        smtp_user = request.form.get("smtp_user", "").strip()
+        smtp_password = request.form.get("smtp_password", "").strip()
+        smtp_use_tls = env_bool("smtp_use_tls", False)
+        if request.form.get("smtp_use_tls"):
+            smtp_use_tls = True
+        smtp_from = request.form.get("smtp_from", "").strip()
+        
+        user_id = current_user.id if current_user.is_authenticated else None
+        
+        try:
+            SystemConfig.set("CSV_EXPORT_EMAIL", csv_email, user_id)
+            SystemConfig.set("CSV_EXPORT_SCHEDULE", csv_schedule, user_id)
+            SystemConfig.set("CSV_EXPORT_DAYS", csv_days, user_id)
+            SystemConfig.set("SMTP_HOST", smtp_host, user_id)
+            SystemConfig.set("SMTP_PORT", smtp_port, user_id)
+            SystemConfig.set("SMTP_USER", smtp_user, user_id)
+            SystemConfig.set("SMTP_PASSWORD", smtp_password, user_id)
+            SystemConfig.set("SMTP_USE_TLS", "true" if smtp_use_tls else "false", user_id)
+            SystemConfig.set("SMTP_FROM", smtp_from, user_id)
+            
+            # スケジューラーを更新
+            update_scheduler()
+            
+            # 監査ログに記録
+            log_audit("admin_settings_update", target_type="system", target_id=None,
+                     metadata_dict={"updated_keys": ["CSV_EXPORT_EMAIL", "CSV_EXPORT_SCHEDULE", "CSV_EXPORT_DAYS", 
+                                                     "SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_USE_TLS", "SMTP_FROM"]})
+            
+            flash("設定を保存しました。", "success")
+            return redirect(url_for("admin_settings"))
+        except Exception as e:
+            db.session.rollback()
+            app.logger.exception(f"Failed to save settings: {e}")
+            flash("設定の保存に失敗しました。", "error")
+    
+    # GETリクエスト時は設定を表示
+    config = SystemConfig.get_all()
+    # 環境変数からのフォールバック
+    csv_email = config.get("CSV_EXPORT_EMAIL") or os.getenv("CSV_EXPORT_EMAIL", "")
+    csv_schedule = config.get("CSV_EXPORT_SCHEDULE") or os.getenv("CSV_EXPORT_SCHEDULE", "")
+    csv_days = config.get("CSV_EXPORT_DAYS") or os.getenv("CSV_EXPORT_DAYS", "30")
+    smtp_host = config.get("SMTP_HOST") or os.getenv("SMTP_HOST", "localhost")
+    smtp_port = config.get("SMTP_PORT") or os.getenv("SMTP_PORT", "25")
+    smtp_user = config.get("SMTP_USER") or os.getenv("SMTP_USER", "")
+    smtp_password = config.get("SMTP_PASSWORD") or os.getenv("SMTP_PASSWORD", "")
+    smtp_use_tls = config.get("SMTP_USE_TLS", os.getenv("SMTP_USE_TLS", "false")).lower() in ("true", "1", "yes", "on")
+    smtp_from = config.get("SMTP_FROM") or os.getenv("SMTP_FROM", "")
+    
+    return render_template("admin_settings.html",
+                         csv_email=csv_email,
+                         csv_schedule=csv_schedule,
+                         csv_days=csv_days,
+                         smtp_host=smtp_host,
+                         smtp_port=smtp_port,
+                         smtp_user=smtp_user,
+                         smtp_password=smtp_password,
+                         smtp_use_tls=smtp_use_tls,
+                         smtp_from=smtp_from)
+
 @app.route("/healthz")
 def healthz():
     return "ok"
@@ -780,58 +909,83 @@ def ensure_db():
 def inject_globals():
     return {"current_user": current_user, "is_admin": (current_user.is_authenticated and current_user.is_admin()), "LOCAL_TZ_NAME": str(LOCAL_TZ), "ALLOW_DEV_LOGIN": ALLOW_DEV_LOGIN}
 
-# 定期CSV送信のスケジューラー初期化
-def init_scheduler():
-    """スケジューラーを初期化"""
-    if not CSV_EXPORT_EMAIL or not CSV_EXPORT_SCHEDULE:
-        return None
-    
-    from apscheduler.schedulers.background import BackgroundScheduler
+# グローバルスケジューラー
+_scheduler = None
+
+def get_trigger_from_schedule(schedule_str):
+    """スケジュール文字列からCronTriggerを生成"""
     from apscheduler.triggers.cron import CronTrigger
     
-    scheduler = BackgroundScheduler()
-    
-    # スケジュール設定のパース
-    schedule_lower = CSV_EXPORT_SCHEDULE.lower().strip()
+    schedule_lower = schedule_str.lower().strip()
     
     if schedule_lower == "daily":
         # 毎日 朝9時に実行
-        trigger = CronTrigger(hour=9, minute=0, timezone=LOCAL_TZ)
+        return CronTrigger(hour=9, minute=0, timezone=LOCAL_TZ)
     elif schedule_lower == "weekly":
         # 毎週月曜日 朝9時に実行
-        trigger = CronTrigger(day_of_week="mon", hour=9, minute=0, timezone=LOCAL_TZ)
+        return CronTrigger(day_of_week="mon", hour=9, minute=0, timezone=LOCAL_TZ)
     elif schedule_lower == "monthly":
         # 毎月1日 朝9時に実行
-        trigger = CronTrigger(day=1, hour=9, minute=0, timezone=LOCAL_TZ)
-    elif " " in CSV_EXPORT_SCHEDULE and CSV_EXPORT_SCHEDULE.count(" ") >= 4:
+        return CronTrigger(day=1, hour=9, minute=0, timezone=LOCAL_TZ)
+    elif " " in schedule_str and schedule_str.count(" ") >= 4:
         # cron形式（例: "0 9 * * *" → 毎日9時）
         try:
-            parts = CSV_EXPORT_SCHEDULE.split()
+            parts = schedule_str.split()
             if len(parts) == 5:
                 # CronTriggerのパラメータ: minute, hour, day, month, day_of_week
-                trigger = CronTrigger(minute=parts[0], hour=parts[1], day=parts[2], month=parts[3], day_of_week=parts[4], timezone=LOCAL_TZ)
+                return CronTrigger(minute=parts[0], hour=parts[1], day=parts[2], month=parts[3], day_of_week=parts[4], timezone=LOCAL_TZ)
             else:
-                app.logger.warning(f"Invalid cron format: {CSV_EXPORT_SCHEDULE}")
+                app.logger.warning(f"Invalid cron format: {schedule_str}")
                 return None
         except Exception as e:
             app.logger.warning(f"Failed to parse cron schedule: {e}")
             return None
     else:
-        app.logger.warning(f"Unknown schedule format: {CSV_EXPORT_SCHEDULE}")
+        app.logger.warning(f"Unknown schedule format: {schedule_str}")
         return None
+
+def update_scheduler():
+    """スケジューラーを更新（設定変更時に呼び出し）"""
+    global _scheduler
+    from apscheduler.schedulers.background import BackgroundScheduler
     
-    scheduler.add_job(func=scheduled_csv_export, trigger=trigger, id="csv_export_job", replace_existing=True)
-    scheduler.start()
-    app.logger.info(f"Scheduled CSV export initialized: {CSV_EXPORT_SCHEDULE} -> {CSV_EXPORT_EMAIL}")
-    return scheduler
+    email, schedule, days = get_csv_export_config()
+    
+    # 既存のスケジューラーを停止
+    if _scheduler:
+        try:
+            _scheduler.shutdown(wait=False)
+        except:
+            pass
+        _scheduler = None
+    
+    # 設定がない場合はスケジューラーを起動しない
+    if not email or not schedule:
+        app.logger.info("CSV export scheduler disabled (email or schedule not set)")
+        return
+    
+    # 新しいスケジューラーを起動
+    try:
+        trigger = get_trigger_from_schedule(schedule)
+        if not trigger:
+            return
+        
+        _scheduler = BackgroundScheduler()
+        _scheduler.add_job(func=scheduled_csv_export, trigger=trigger, id="csv_export_job", replace_existing=True)
+        _scheduler.start()
+        app.logger.info(f"Scheduled CSV export updated: {schedule} -> {email}")
+    except Exception as e:
+        app.logger.exception(f"Failed to update scheduler: {e}")
+
+def init_scheduler():
+    """スケジューラーを初期化（起動時）"""
+    update_scheduler()
 
 # アプリ起動時にスケジューラーを初期化
-_scheduler = None
-if CSV_EXPORT_EMAIL and CSV_EXPORT_SCHEDULE:
-    try:
-        _scheduler = init_scheduler()
-    except Exception as e:
-        app.logger.exception(f"Failed to initialize scheduler: {e}")
+try:
+    init_scheduler()
+except Exception as e:
+    app.logger.exception(f"Failed to initialize scheduler: {e}")
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")), debug=True)

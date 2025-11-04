@@ -9,6 +9,7 @@
       </div>
       <div class="d-flex gap-2 flex-wrap">
         <a class="btn btn-outline-primary" href="{{ url_for('admin_audit') }}">監査ログ</a>
+        <a class="btn btn-outline-info" href="{{ url_for('admin_settings') }}">設定</a>
         <a class="btn btn-outline-secondary" href="{{ url_for('admin_export', start=start, end=end, email=user_email) }}">CSVエクスポート</a>
       </div>
     </div>
@@ -31,9 +32,9 @@
           {% endfor %}
         </datalist>
       </div>
-      <div class="col d-flex gap-2">
-        <button class="btn btn-primary flex-grow-1">表示更新</button>
-        <a class="btn btn-outline-secondary" href="{{ url_for('admin') }}">リセット</a>
+      <div class="col d-flex flex-column flex-md-row gap-2">
+        <button class="btn btn-primary w-100 w-md-auto">表示更新</button>
+        <a class="btn btn-outline-secondary w-100 w-md-auto" href="{{ url_for('admin') }}">リセット</a>
       </div>
     </form>
 
@@ -51,7 +52,7 @@
       </div>
       {% if daily_totals %}
       <div class="table-responsive">
-        <table class="table table-sm align-middle mb-0" aria-label="日別集計">
+        <table class="table table-sm align-middle mb-0 table-stack" aria-label="日別集計">
           <thead class="table-light">
             <tr>
               <th scope="col">日付</th>
@@ -62,9 +63,9 @@
           <tbody>
             {% for day in daily_totals %}
             <tr>
-              <td>{{ day.date|fmt_date_ja }}</td>
-              <td>{{ day.count }}</td>
-              <td>{{ day.worked_hms }}</td>
+              <td data-label="日付">{{ day.date|fmt_date_ja }}</td>
+              <td data-label="シフト数">{{ day.count }}</td>
+              <td data-label="実働合計">{{ day.worked_hms }}</td>
             </tr>
             {% endfor %}
           </tbody>
@@ -76,7 +77,7 @@
     </div>
 
     <div class="table-responsive mt-4">
-      <table class="table table-sm align-middle">
+      <table class="table table-sm align-middle table-stack" aria-label="シフト一覧">
         <thead class="table-light">
           <tr>
             <th>ユーザー</th>
@@ -87,37 +88,37 @@
             <th>操作</th>
           </tr>
         </thead>
-        <tbody>
+      <tbody>
           {% for s in shifts %}
           <tr class="{% if s.is_open %}table-warning{% endif %}">
-            <td>
+            <td data-label="ユーザー">
               <div class="fw-semibold">{{ s.user.name or s.user.email }}</div>
               <div class="text-muted small">{{ s.user.email }}</div>
             </td>
-            <td>
+            <td data-label="出勤">
               <div>{{ s.clock_in_at|fmt_dt }}</div>
               {% if s.is_open %}<span class="badge bg-warning-subtle text-warning-emphasis border">出勤中</span>{% endif %}
             </td>
-            <td>{{ s.clock_out_at|fmt_dt }}</td>
-            <td>
+            <td data-label="退勤">{{ s.clock_out_at|fmt_dt }}</td>
+            <td data-label="実働 / 休憩">
               <div class="fw-semibold">{{ s.worked_seconds()|fmt_hms }}</div>
               <div class="text-muted small">休憩 {{ s.breaks|length }} / {{ s.total_break_seconds()|fmt_hms }}</div>
             </td>
-            <td class="small">
+            <td class="small" data-label="IP (in/out)">
               <div>{{ s.clock_in_ip or '-' }}</div>
               <div>{{ s.clock_out_ip or '-' }}</div>
             </td>
-            <td>
-              <div class="d-flex flex-column gap-2">
-                <button type="button" class="btn btn-sm btn-outline-primary" data-shift-edit="{{ s.id }}" data-detail-url="{{ url_for('admin_shift_detail', shift_id=s.id) }}" data-action-url="{{ url_for('admin_shift_edit', shift_id=s.id) }}">
+            <td data-label="操作">
+              <div class="d-flex flex-column flex-lg-row gap-2">
+                <button type="button" class="btn btn-sm btn-outline-primary flex-fill" data-shift-edit="{{ s.id }}" data-detail-url="{{ url_for('admin_shift_detail', shift_id=s.id) }}" data-action-url="{{ url_for('admin_shift_edit', shift_id=s.id) }}">
                   編集
                 </button>
-                <a href="{{ url_for('admin_shift_edit', shift_id=s.id) }}" class="btn btn-sm btn-outline-secondary">詳細画面</a>
+                <a href="{{ url_for('admin_shift_edit', shift_id=s.id) }}" class="btn btn-sm btn-outline-secondary flex-fill">詳細画面</a>
               </div>
             </td>
           </tr>
           {% else %}
-          <tr><td colspan="6" class="text-muted">該当なし</td></tr>
+          <tr><td colspan="6" class="text-muted" data-label="検索結果">該当なし</td></tr>
           {% endfor %}
         </tbody>
       </table>

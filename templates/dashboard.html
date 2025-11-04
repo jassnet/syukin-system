@@ -45,7 +45,7 @@
       <div class="card-body">
         <h2 class="h5 mb-3">最近の打刻</h2>
         <div class="table-responsive">
-          <table class="table table-sm align-middle table-nowrap">
+          <table class="table table-sm align-middle table-stack" aria-label="最近の打刻">
             <thead>
               <tr>
                 <th>ID</th>
@@ -58,11 +58,11 @@
             <tbody>
               {% for s in recent %}
               <tr>
-                <td>#{{ s.id }}</td>
-                <td>{{ s.clock_in_at|fmt_dt }}</td>
-                <td>{{ s.clock_out_at|fmt_dt }}</td>
-                <td>{{ s.total_break_seconds()|fmt_hms }}</td>
-                <td>{{ s.worked_seconds()|fmt_hms }}</td>
+                <td data-label="ID">#{{ s.id }}</td>
+                <td data-label="出勤">{{ s.clock_in_at|fmt_dt }}</td>
+                <td data-label="退勤">{{ s.clock_out_at|fmt_dt }}</td>
+                <td data-label="休憩合計">{{ s.total_break_seconds()|fmt_hms }}</td>
+                <td data-label="実働">{{ s.worked_seconds()|fmt_hms }}</td>
               </tr>
               {% else %}
               <tr><td colspan="5" class="text-muted">記録がありません。</td></tr>
