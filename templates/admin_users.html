@@ -1,0 +1,161 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="card shadow-sm">
+  <div class="card-body">
+    <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-4">
+      <div>
+        <h2 class="h5 mb-0">ユーザー管理</h2>
+      </div>
+      <div class="d-flex gap-2 flex-wrap">
+        <a class="btn btn-outline-secondary" href="{{ url_for('admin') }}">出退勤記録に戻る</a>
+      </div>
+    </div>
+
+    <div class="card mb-4">
+      <div class="card-header">
+        <h3 class="h6 mb-0">新規ユーザー作成</h3>
+      </div>
+      <div class="card-body">
+        <form method="post" class="row g-3">
+          <input type="hidden" name="csrf_token" value="{{ session.csrf_token }}">
+          <input type="hidden" name="action" value="create">
+          <div class="col-md-3">
+            <label class="form-label">ユーザーID <span class="text-danger">*</span></label>
+            <input type="text" class="form-control" name="username" required>
+          </div>
+          <div class="col-md-3">
+            <label class="form-label">パスワード <span class="text-danger">*</span></label>
+            <input type="password" class="form-control" name="password" required>
+          </div>
+          <div class="col-md-2">
+            <label class="form-label">氏名</label>
+            <input type="text" class="form-control" name="name">
+          </div>
+          <div class="col-md-2">
+            <label class="form-label">メール</label>
+            <input type="email" class="form-control" name="email">
+          </div>
+          <div class="col-md-2">
+            <label class="form-label">権限</label>
+            <select class="form-select" name="role">
+              <option value="user">一般ユーザー</option>
+              <option value="admin">管理者</option>
+            </select>
+          </div>
+          <div class="col-12">
+            <button type="submit" class="btn btn-primary">作成</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <div class="table-responsive">
+      <table class="table table-sm align-middle table-stack" aria-label="ユーザー一覧">
+        <thead class="table-light">
+          <tr>
+            <th>ユーザーID</th>
+            <th>氏名</th>
+            <th>メール</th>
+            <th>権限</th>
+            <th>最終ログイン</th>
+            <th>作成日時</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for user in users %}
+          <tr>
+            <td data-label="ユーザーID">
+              <div class="fw-semibold">{{ user.username }}</div>
+            </td>
+            <td data-label="氏名">{{ user.name or '-' }}</td>
+            <td data-label="メール">{{ user.email or '-' }}</td>
+            <td data-label="権限">
+              {% if user.role == 'admin' %}
+                <span class="badge bg-danger">管理者</span>
+              {% else %}
+                <span class="badge bg-secondary">一般</span>
+              {% endif %}
+            </td>
+            <td data-label="最終ログイン">{{ user.last_login_at|fmt_dt if user.last_login_at else '-' }}</td>
+            <td data-label="作成日時">{{ user.created_at|fmt_dt }}</td>
+            <td data-label="操作">
+              <div class="d-flex flex-column flex-lg-row gap-2">
+                <button type="button" class="btn btn-sm btn-outline-primary" data-bs-toggle="modal" data-bs-target="#editModal{{ user.id }}">
+                  編集
+                </button>
+                {% if user.id != current_user.id %}
+                <form method="post" style="display: inline;" onsubmit="return confirm('本当にこのユーザーを削除しますか？');">
+                  <input type="hidden" name="csrf_token" value="{{ session.csrf_token }}">
+                  <input type="hidden" name="action" value="delete">
+                  <input type="hidden" name="user_id" value="{{ user.id }}">
+                  <button type="submit" class="btn btn-sm btn-outline-danger">削除</button>
+                </form>
+                {% endif %}
+              </div>
+            </td>
+          </tr>
+
+          <!-- 編集モーダル -->
+          <div class="modal fade" id="editModal{{ user.id }}" tabindex="-1" aria-hidden="true">
+            <div class="modal-dialog">
+              <div class="modal-content">
+                <form method="post">
+                  <div class="modal-header">
+                    <h5 class="modal-title">ユーザー編集: {{ user.username }}</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="閉じる"></button>
+                  </div>
+                  <div class="modal-body">
+                    <input type="hidden" name="csrf_token" value="{{ session.csrf_token }}">
+                    <input type="hidden" name="action" value="update">
+                    <input type="hidden" name="user_id" value="{{ user.id }}">
+                    <div class="mb-3">
+                      <label class="form-label">ユーザーID</label>
+                      <input type="text" class="form-control" value="{{ user.username }}" disabled>
+                      <div class="form-text">ユーザーIDは変更できません</div>
+                    </div>
+                    <div class="mb-3">
+                      <label class="form-label">パスワード</label>
+                      <input type="password" class="form-control" name="password" placeholder="変更する場合のみ入力">
+                      <div class="form-text">変更しない場合は空欄のまま</div>
+                    </div>
+                    <div class="mb-3">
+                      <label class="form-label">氏名</label>
+                      <input type="text" class="form-control" name="name" value="{{ user.name or '' }}">
+                    </div>
+                    <div class="mb-3">
+                      <label class="form-label">メール</label>
+                      <input type="email" class="form-control" name="email" value="{{ user.email or '' }}">
+                    </div>
+                    <div class="mb-3">
+                      <label class="form-label">権限</label>
+                      <select class="form-select" name="role">
+                        <option value="user" {% if user.role == 'user' %}selected{% endif %}>一般ユーザー</option>
+                        <option value="admin" {% if user.role == 'admin' %}selected{% endif %}>管理者</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">キャンセル</button>
+                    <button type="submit" class="btn btn-primary">更新</button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          </div>
+          {% else %}
+          <tr>
+            <td colspan="7" class="text-muted" data-label="検索結果">ユーザーが登録されていません</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+
+
+
+

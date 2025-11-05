@@ -11,8 +11,8 @@ from zoneinfo import ZoneInfo
 from flask import Flask, render_template, redirect, url_for, session, request, abort, flash, make_response, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
-from authlib.integrations.flask_client import OAuth
 from werkzeug.middleware.proxy_fix import ProxyFix
+from werkzeug.security import generate_password_hash, check_password_hash
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -39,8 +39,6 @@ app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["SESSION_COOKIE_SECURE"] = env_bool("SESSION_COOKIE_SECURE", False)
 
 LOCAL_TZ = ZoneInfo(os.getenv("TIMEZONE", "Asia/Tokyo"))
-ADMIN_EMAILS = set([e.strip().lower() for e in (os.getenv("ADMIN_EMAILS") or "").split(",") if e.strip()])
-ALLOW_DEV_LOGIN = env_bool("ALLOW_DEV_LOGIN", False)
 # 定期CSV送信設定
 CSV_EXPORT_EMAIL = os.getenv("CSV_EXPORT_EMAIL", "").strip()
 CSV_EXPORT_SCHEDULE = os.getenv("CSV_EXPORT_SCHEDULE", "")  # 例: "daily" (毎日), "weekly" (毎週月曜), "monthly" (毎月1日), cron形式も可
@@ -53,26 +51,27 @@ WEEKDAY_JA = ["月", "火", "水", "木", "金", "土", "日"]
 login_manager = LoginManager(app)
 login_manager.login_view = "login"
 
-oauth = OAuth(app)
-oauth.register(
-    name="google",
-    server_metadata_url="https://accounts.google.com/.well-known/openid-configuration",
-    client_id=os.getenv("GOOGLE_CLIENT_ID"),
-    client_secret=os.getenv("GOOGLE_CLIENT_SECRET"),
-    client_kwargs={"scope": "openid email profile"},
-)
-
 class User(db.Model, UserMixin):
     __tablename__ = "users"
     id = db.Column(db.Integer, primary_key=True)
-    email = db.Column(db.String(320), unique=True, nullable=False, index=True)
+    username = db.Column(db.String(100), unique=True, nullable=False, index=True)
+    password_hash = db.Column(db.String(255), nullable=False)
+    email = db.Column(db.String(320), unique=True, nullable=True, index=True)
     name = db.Column(db.String(200))
     picture = db.Column(db.String(500))
     role = db.Column(db.String(20), default="user")
-    google_sub = db.Column(db.String(64), index=True)
     created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     last_login_at = db.Column(db.DateTime(timezone=True))
     shifts = db.relationship("Shift", backref="user", lazy=True)
+    
+    def set_password(self, password):
+        """パスワードをハッシュ化して設定"""
+        self.password_hash = generate_password_hash(password)
+    
+    def check_password(self, password):
+        """パスワードを検証"""
+        return check_password_hash(self.password_hash, password)
+    
     def is_admin(self):
         return self.role == "admin"
 
@@ -264,69 +263,31 @@ def fmt_date_ja(value):
     weekday = WEEKDAY_JA[value.weekday()]
     return f"{value.year}年{value.month:02d}月{value.day:02d}日({weekday})"
 
-@app.route("/login")
+@app.route("/login", methods=["GET", "POST"])
 def login():
     ensure_csrf()
-    return render_template("login.html", allow_dev_login=ALLOW_DEV_LOGIN)
-
-@app.route("/auth/google")
-def auth_google():
-    redirect_uri = os.getenv("OAUTH_REDIRECT_URI") or url_for("auth_callback", _external=True)
-    return oauth.google.authorize_redirect(redirect_uri)
-
-@app.route("/auth/callback")
-def auth_callback():
-    token = oauth.google.authorize_access_token()
-    userinfo_endpoint = oauth.google.server_metadata.get(
-        "userinfo_endpoint", "https://openidconnect.googleapis.com/v1/userinfo"
-    )
-    resp = oauth.google.get(userinfo_endpoint)
-    if resp.status_code != 200:
-        abort(400, "Failed to fetch user info from Google")
-    info = resp.json()
-    email = (info.get("email") or "").lower()
-    if not email:
-        abort(400, "Email not returned by Google")
-    sub = info.get("sub")
-    name = info.get("name") or email
-    picture = info.get("picture")
-    user = User.query.filter_by(email=email).first()
-    if not user:
-        role = "admin" if email in ADMIN_EMAILS else "user"
-        user = User(email=email, name=name, picture=picture, role=role, google_sub=sub)
-        db.session.add(user)
-    else:
-        user.name = name
-        user.picture = picture or user.picture
-        user.google_sub = sub or user.google_sub
-        if email in ADMIN_EMAILS and user.role != "admin":
-            user.role = "admin"
-    user.last_login_at = datetime.now(timezone.utc)
-    db.session.commit()
-    login_user(user)
-    log_audit("login", target_type="user", target_id=user.id, metadata_dict={"email": email})
-    return redirect(url_for("dashboard"))
-
-@app.route("/devlogin", methods=["GET","POST"])
-def devlogin():
-    # Optional, for local testing without Google OAuth. Controlled by ALLOW_DEV_LOGIN.
-    if not ALLOW_DEV_LOGIN:
-        abort(404)
-    ensure_csrf()
     if request.method == "POST":
-        email = (request.form.get("email","") or "").strip().lower()
-        if not email:
-            flash("メールを入力してください。", "error")
-            return redirect(url_for("devlogin"))
-        user = User.query.filter_by(email=email).first()
-        if not user:
-            role = "admin" if email in ADMIN_EMAILS else "user"
-            user = User(email=email, name=email.split("@")[0], role=role)
-            db.session.add(user); db.session.commit()
-        login_user(user)
-        log_audit("devlogin", target_type="user", target_id=user.id, metadata_dict={"email": email})
-        return redirect(url_for("dashboard"))
-    return render_template("devlogin.html")
+        verify_csrf()
+        username = request.form.get("username", "").strip()
+        password = request.form.get("password", "")
+        
+        if not username or not password:
+            flash("ユーザーIDとパスワードを入力してください。", "error")
+            return redirect(url_for("login"))
+        
+        user = User.query.filter_by(username=username).first()
+        if user and user.check_password(password):
+            user.last_login_at = datetime.now(timezone.utc)
+            db.session.commit()
+            login_user(user)
+            log_audit("login", target_type="user", target_id=user.id, metadata_dict={"username": username})
+            flash("ログインしました。", "success")
+            return redirect(url_for("dashboard"))
+        else:
+            flash("ユーザーIDまたはパスワードが正しくありません。", "error")
+            return redirect(url_for("login"))
+    
+    return render_template("login.html")
 
 @app.route("/logout")
 @login_required
@@ -424,7 +385,7 @@ def require_admin():
 def admin():
     require_admin()
     ensure_csrf()
-    start = request.args.get("start"); end = request.args.get("end"); user_email = request.args.get("email", "").strip().lower()
+    start = request.args.get("start"); end = request.args.get("end"); user_username = request.args.get("username", "").strip()
     now_local = datetime.now(LOCAL_TZ)
     default_end = now_local.date(); default_start = default_end - timedelta(days=13)
     try:
@@ -435,8 +396,8 @@ def admin():
     start_utc = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=LOCAL_TZ).astimezone(timezone.utc)
     end_utc = datetime.combine(end_date, datetime.max.time()).replace(tzinfo=LOCAL_TZ).astimezone(timezone.utc)
     q = Shift.query.join(User).filter(Shift.clock_in_at >= start_utc, Shift.clock_in_at <= end_utc)
-    if user_email:
-        q = q.filter(User.email == user_email)
+    if user_username:
+        q = q.filter(User.username == user_username)
     shifts = q.order_by(Shift.clock_in_at.desc()).all()
 
     daily_buckets = defaultdict(lambda: {"seconds": 0, "count": 0})
@@ -458,25 +419,27 @@ def admin():
         for date_key, bucket in sorted(daily_buckets.items(), reverse=True)
     ]
 
-    user_candidates = User.query.order_by(User.name.asc(), User.email.asc()).all()
+    user_candidates = User.query.order_by(User.username.asc()).all()
 
     return render_template(
         "admin.html",
         shifts=shifts,
         start=start_date.isoformat(),
         end=end_date.isoformat(),
-        user_email=user_email,
+        user_username=user_username,
         daily_totals=daily_totals,
         user_candidates=user_candidates,
     )
 
-def generate_csv(start_date, end_date, user_email=None):
+def generate_csv(start_date, end_date, user_username=None, user_email=None):
     """CSVデータを生成する共通関数"""
     start_utc = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=LOCAL_TZ).astimezone(timezone.utc)
     end_utc = datetime.combine(end_date, datetime.max.time()).replace(tzinfo=LOCAL_TZ).astimezone(timezone.utc)
     
     q = Shift.query.join(User).filter(Shift.clock_in_at >= start_utc, Shift.clock_in_at <= end_utc)
-    if user_email:
+    if user_username:
+        q = q.filter(User.username == user_username)
+    elif user_email:
         q = q.filter(User.email == user_email)
     shifts = q.order_by(Shift.clock_in_at.asc()).all()
     
@@ -484,13 +447,13 @@ def generate_csv(start_date, end_date, user_email=None):
     from io import StringIO
     buf = StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["user_email","user_name","shift_id","clock_in_local","clock_out_local","worked_seconds","worked_hms","clock_in_utc","clock_out_utc","clock_in_ip","clock_out_ip","clock_in_ua","clock_out_ua","break_count","breaks_total_seconds","breaks_total_hms"])
+    writer.writerow(["user_username","user_email","user_name","shift_id","clock_in_local","clock_out_local","worked_seconds","worked_hms","clock_in_utc","clock_out_utc","clock_in_ip","clock_out_ip","clock_in_ua","clock_out_ua","break_count","breaks_total_seconds","breaks_total_hms"])
     for s in shifts:
         in_local = s.clock_in_at.astimezone(LOCAL_TZ) if s.clock_in_at else None
         out_local = s.clock_out_at.astimezone(LOCAL_TZ) if s.clock_out_at else None
         worked = s.worked_seconds(); brk_sec = s.total_break_seconds()
         writer.writerow([
-            s.user.email, s.user.name or "", s.id,
+            s.user.username, s.user.email or "", s.user.name or "", s.id,
             in_local.strftime("%Y-%m-%d %H:%M:%S") if in_local else "",
             out_local.strftime("%Y-%m-%d %H:%M:%S") if out_local else "",
             worked, f"{worked//3600:02d}:{(worked%3600)//60:02d}:{worked%60:02d}",
@@ -506,6 +469,7 @@ def generate_csv(start_date, end_date, user_email=None):
 def admin_export():
     require_admin()
     start = request.args.get("start"); end = request.args.get("end"); user_email = request.args.get("email", "").strip().lower()
+    user_username = request.args.get("username", "").strip()
     now_local = datetime.now(LOCAL_TZ)
     default_end = now_local.date(); default_start = default_end - timedelta(days=13)
     try:
@@ -514,7 +478,7 @@ def admin_export():
     except ValueError:
         abort(400, "日付の形式が不正です。YYYY-MM-DD で指定してください。")
     
-    csv_data, shift_count = generate_csv(start_date, end_date, user_email if user_email else None)
+    csv_data, shift_count = generate_csv(start_date, end_date, user_username if user_username else None, user_email if user_email else None)
     filename = f"attendance_export_{start_date.isoformat()}_{end_date.isoformat()}.csv"
     resp = make_response(csv_data)
     resp.headers["Content-Type"] = "text/csv; charset=utf-8"
@@ -585,7 +549,7 @@ def scheduled_csv_export():
         start_date = end_date - timedelta(days=days)
         
         try:
-            csv_data, shift_count = generate_csv(start_date, end_date)
+            csv_data, shift_count = generate_csv(start_date, end_date, None, None)
             send_csv_email(email, csv_data, start_date, end_date)
             log_audit("scheduled_csv_export", target_type="system", target_id=None, 
                      metadata_dict={"email": email, "start": start_date.isoformat(), 
@@ -648,7 +612,8 @@ def admin_shift_edit(shift_id):
             # 監査ログに記録（変更前後の値を含む）
             log_audit("admin_shift_edit", target_type="shift", target_id=shift_id,
                      metadata_dict={
-                         "user_email": shift.user.email,
+                         "user_username": shift.user.username,
+                         "user_email": shift.user.email or "",
                          "old_values": old_values,
                          "new_values": new_values,
                      })
@@ -682,8 +647,9 @@ def admin_shift_detail(shift_id):
     
     return jsonify({
         "id": shift.id,
-        "user_email": shift.user.email,
-        "user_name": shift.user.name,
+        "user_username": shift.user.username,
+        "user_email": shift.user.email or "",
+        "user_name": shift.user.name or "",
         "clock_in_at": clock_in_local.strftime("%Y-%m-%d %H:%M:%S") if clock_in_local else None,
         "clock_out_at": clock_out_local.strftime("%Y-%m-%d %H:%M:%S") if clock_out_local else None,
         "clock_in_form": clock_in_local.strftime("%Y-%m-%dT%H:%M") if clock_in_local else "",
@@ -701,20 +667,20 @@ def admin_shift_detail(shift_id):
 
 def _parse_audit_filters(max_limit=500, default_limit=200):
     action = request.args.get("action", "").strip()
-    email = (request.args.get("email", "") or "").strip().lower()
+    username = request.args.get("username", "").strip()
     try:
         limit = int(request.args.get("limit", str(default_limit)))
     except ValueError:
         limit = default_limit
     limit = max(1, min(limit, max_limit))
-    return action, email, limit
+    return action, username, limit
 
-def _audit_log_query(action, email):
+def _audit_log_query(action, username):
     query = AuditLog.query.order_by(AuditLog.created_at.desc())
     if action:
         query = query.filter(AuditLog.action == action)
-    if email:
-        query = query.join(User).filter(db.func.lower(User.email) == email)
+    if username:
+        query = query.join(User).filter(User.username == username)
     return query
 
 @app.route("/admin/audit")
@@ -724,11 +690,12 @@ def admin_audit():
     require_admin()
     ensure_csrf()
 
-    action, email, limit = _parse_audit_filters()
-    query = _audit_log_query(action, email)
+    action, username, limit = _parse_audit_filters()
+    query = _audit_log_query(action, username)
     logs = query.limit(limit).all()
     action_rows = db.session.query(AuditLog.action).distinct().order_by(AuditLog.action.asc()).all()
     action_choices = [row[0] for row in action_rows]
+    user_candidates = User.query.order_by(User.username.asc()).all()
 
     log_entries = []
     for log in logs:
@@ -743,8 +710,9 @@ def admin_audit():
         log_entries=log_entries,
         action_choices=action_choices,
         selected_action=action,
-        selected_email=email,
+        selected_username=username,
         limit=limit,
+        user_candidates=user_candidates,
     )
 
 @app.route("/admin/audit/export")
@@ -752,8 +720,8 @@ def admin_audit():
 def admin_audit_export():
     """監査ログのCSVエクスポート"""
     require_admin()
-    action, email, limit = _parse_audit_filters(max_limit=5000, default_limit=1000)
-    query = _audit_log_query(action, email)
+    action, username, limit = _parse_audit_filters(max_limit=5000, default_limit=1000)
+    query = _audit_log_query(action, username)
     logs = query.limit(limit).all()
 
     import csv
@@ -765,6 +733,7 @@ def admin_audit_export():
         "created_at_local",
         "created_at_utc",
         "action",
+        "user_username",
         "user_email",
         "user_name",
         "target_type",
@@ -788,6 +757,7 @@ def admin_audit_export():
             created_local,
             created_utc,
             log.action,
+            log.user.username if log.user else "",
             log.user.email if log.user else "",
             log.user.name if log.user else "",
             log.target_type or "",
@@ -810,7 +780,7 @@ def admin_audit_export():
         target_id=None,
         metadata_dict={
             "action": action or None,
-            "email": email or None,
+            "username": username or None,
             "limit": limit,
             "count": len(logs),
         },
@@ -897,6 +867,82 @@ def admin_settings():
                          smtp_use_tls=smtp_use_tls,
                          smtp_from=smtp_from)
 
+@app.route("/admin/users", methods=["GET", "POST"])
+@login_required
+def admin_users():
+    """ユーザー管理ページ"""
+    require_admin()
+    ensure_csrf()
+    
+    if request.method == "POST":
+        verify_csrf()
+        action = request.form.get("action")
+        
+        if action == "create":
+            username = request.form.get("username", "").strip()
+            password = request.form.get("password", "")
+            name = request.form.get("name", "").strip()
+            email = request.form.get("email", "").strip()
+            role = request.form.get("role", "user")
+            
+            if not username or not password:
+                flash("ユーザーIDとパスワードは必須です。", "error")
+                return redirect(url_for("admin_users"))
+            
+            if User.query.filter_by(username=username).first():
+                flash("このユーザーIDは既に使用されています。", "error")
+                return redirect(url_for("admin_users"))
+            
+            user = User(username=username, name=name or None, email=email or None, role=role)
+            user.set_password(password)
+            db.session.add(user)
+            db.session.commit()
+            log_audit("admin_user_create", target_type="user", target_id=user.id, 
+                     metadata_dict={"username": username, "role": role})
+            flash("ユーザーを作成しました。", "success")
+            return redirect(url_for("admin_users"))
+        
+        elif action == "update":
+            user_id = request.form.get("user_id")
+            user = User.query.get_or_404(user_id)
+            
+            name = request.form.get("name", "").strip()
+            email = request.form.get("email", "").strip()
+            role = request.form.get("role", "user")
+            password = request.form.get("password", "").strip()
+            
+            user.name = name or None
+            user.email = email or None
+            user.role = role
+            
+            if password:
+                user.set_password(password)
+            
+            db.session.commit()
+            log_audit("admin_user_update", target_type="user", target_id=user.id,
+                     metadata_dict={"username": user.username, "role": role, "password_changed": bool(password)})
+            flash("ユーザーを更新しました。", "success")
+            return redirect(url_for("admin_users"))
+        
+        elif action == "delete":
+            user_id = request.form.get("user_id")
+            user = User.query.get_or_404(user_id)
+            
+            if user.id == current_user.id:
+                flash("自分自身を削除することはできません。", "error")
+                return redirect(url_for("admin_users"))
+            
+            username = user.username
+            db.session.delete(user)
+            db.session.commit()
+            log_audit("admin_user_delete", target_type="user", target_id=user_id,
+                     metadata_dict={"username": username})
+            flash("ユーザーを削除しました。", "success")
+            return redirect(url_for("admin_users"))
+    
+    users = User.query.order_by(User.username.asc()).all()
+    return render_template("admin_users.html", users=users)
+
 @app.route("/healthz")
 def healthz():
     return "ok"
@@ -907,7 +953,7 @@ def ensure_db():
 
 @app.context_processor
 def inject_globals():
-    return {"current_user": current_user, "is_admin": (current_user.is_authenticated and current_user.is_admin()), "LOCAL_TZ_NAME": str(LOCAL_TZ), "ALLOW_DEV_LOGIN": ALLOW_DEV_LOGIN}
+    return {"current_user": current_user, "is_admin": (current_user.is_authenticated and current_user.is_admin()), "LOCAL_TZ_NAME": str(LOCAL_TZ)}
 
 # グローバルスケジューラー
 _scheduler = None

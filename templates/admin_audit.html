@@ -8,7 +8,7 @@
         <p class="text-muted small mb-0">最新の操作履歴を上から表示しています。</p>
       </div>
       <div class="d-flex gap-2 flex-wrap">
-        <a href="{{ url_for('admin_audit_export', action=selected_action or None, email=selected_email or None, limit=limit) }}" class="btn btn-outline-primary">CSVエクスポート</a>
+        <a href="{{ url_for('admin_audit_export', action=selected_action or None, username=selected_username or None, limit=limit) }}" class="btn btn-outline-primary">CSVエクスポート</a>
         <a href="{{ url_for('admin') }}" class="btn btn-outline-secondary">管理画面へ戻る</a>
       </div>
     </div>
@@ -24,8 +24,13 @@
         </select>
       </div>
       <div class="col">
-        <label class="form-label">ユーザーメール</label>
-        <input type="email" class="form-control" name="email" value="{{ selected_email }}" placeholder="name@example.com">
+        <label class="form-label">ユーザーID</label>
+        <input type="text" class="form-control" name="username" value="{{ selected_username }}" list="audit-username-list" placeholder="username">
+        <datalist id="audit-username-list">
+          {% for user in user_candidates %}
+          <option value="{{ user.username }}">{{ user.name or user.username }}</option>
+          {% endfor %}
+        </datalist>
       </div>
       <div class="col">
         <label class="form-label">最大件数</label>
@@ -60,8 +65,8 @@
               <td data-label="日時">{{ log.created_at|fmt_dt }}</td>
               <td data-label="ユーザー">
                 {% if log.user %}
-                  <div class="fw-semibold">{{ log.user.name or log.user.email }}</div>
-                  <div class="text-muted small">{{ log.user.email }}</div>
+                  <div class="fw-semibold">{{ log.user.name or log.user.username }}</div>
+                  <div class="text-muted small">{{ log.user.username }}{% if log.user.email %} ({{ log.user.email }}){% endif %}</div>
                 {% else %}
                   <span class="text-muted small">(system)</span>
                 {% endif %}

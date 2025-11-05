@@ -17,10 +17,9 @@ source .venv/bin/activate  # Windows: .venv\Scripts\activate
 # 2) 依存インストール
 pip install -r requirements.txt
 
-# 3) .env を用意
-cp .env.example .env
+# 3) .env を用意（オプション）
 # 初期状態は SQLite (attendance.db) なので DB セットアップ不要
-# Google OAuth を使わずに動作確認したい場合は .env の ALLOW_DEV_LOGIN=true に
+# 必要に応じて .env ファイルを作成して設定をカスタマイズ
 
 # 4) 起動（開発用）
 python -m flask --app app run -p 8000
@@ -28,9 +27,36 @@ python -m flask --app app run -p 8000
 gunicorn -w 3 -b 0.0.0.0:8000 app:app
 ```
 
-- ブラウザで <http://localhost:8000>  
-- **Google OAuth** で試す場合は、`GOOGLE_CLIENT_ID/SECRET` と `OAUTH_REDIRECT_URI` を設定してください。  
-- **簡易確認**だけなら `.env` で `ALLOW_DEV_LOGIN=true` を設定し、`/devlogin` からメール入力でログイン可能（**本番では必ず false**）。
+- ブラウザで <http://localhost:8000> にアクセス
+- **初回起動時**: データベーステーブルが自動作成されます
+- **初期管理者ユーザーの作成**: アプリ起動後、データベースに直接管理者ユーザーを作成する必要があります（下記参照）
+
+---
+
+## 初期管理者ユーザーの作成
+
+アプリ起動後、以下のいずれかの方法で初期管理者ユーザーを作成してください：
+
+### 方法1: Pythonコンソールから作成（推奨）
+
+```bash
+python
+```
+
+```python
+from app import app, db, User
+with app.app_context():
+    admin = User(username='admin', role='admin')
+    admin.set_password('初期パスワード')  # 適宜変更してください
+    admin.name = '管理者'
+    db.session.add(admin)
+    db.session.commit()
+    print("管理者ユーザーを作成しました")
+```
+
+### 方法2: 既存の管理者ユーザーから作成
+
+既に管理者ユーザーが存在する場合、管理画面（`/admin/users`）から新しいユーザーを作成できます。
 
 ---
 
@@ -54,18 +80,16 @@ gunicorn -w 3 -b 0.0.0.0:8000 app:app
   - Build コマンド: `pip install -r requirements.txt`
   - Start コマンド: `gunicorn app:app`
   - 環境変数を登録：
-    - `SECRET_KEY`
-    - `TIMEZONE`（例: `Asia/Tokyo`）
-    - `ADMIN_EMAILS`（管理者メール）
-    - `DATABASE_URL`（**PostgreSQL** のURL）
-    - `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `OAUTH_REDIRECT_URI`
-    - `SESSION_COOKIE_SECURE=true`（HTTPS運用時）
+    - `SECRET_KEY`: セッション暗号化用の秘密鍵（ランダムな長い文字列）
+    - `TIMEZONE`（例: `Asia/Tokyo`）: 表示用タイムゾーン
+    - `DATABASE_URL`（**PostgreSQL** のURL）: 本番環境では必須
+    - `SESSION_COOKIE_SECURE=true`（HTTPS運用時）: HTTPSを使用する場合は必須
     - **定期CSV送信**（任意）:
       - `CSV_EXPORT_EMAIL`: 送信先メールアドレス
       - `CSV_EXPORT_SCHEDULE`: `daily`（毎日）/ `weekly`（毎週月曜）/ `monthly`（毎月1日）/ cron形式（例: `0 9 * * *`）
       - `CSV_EXPORT_DAYS`: 過去何日分をエクスポートするか（既定: 30日）
       - `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_USE_TLS`, `SMTP_FROM`
-  - 公開URL を Google OAuth のリダイレクトURIに設定
+  - **デプロイ後**: 初期管理者ユーザーを作成してください（上記の「初期管理者ユーザーの作成」を参照）
 
 > 任意の PaaS を使えます（**Docker 不要**）。`Procfile` があるので多くのサービスでそのまま起動できます。
 
@@ -73,9 +97,14 @@ gunicorn -w 3 -b 0.0.0.0:8000 app:app
 
 ## 仕様（抜粋）
 
-- Google ログイン（/login → Google → /auth/callback）
+- **認証方式**: ユーザーIDとパスワードによるログイン
+- **ユーザー管理**: 管理者がユーザーの作成・編集・削除が可能
 - ダッシュボード：出勤/退勤/休憩開始/休憩終了
-- 管理画面：期間/メールで絞込、CSV エクスポート、出退勤データの編集
+- 管理画面：
+  - 期間/ユーザーIDで絞込
+  - CSV エクスポート
+  - 出退勤データの編集
+  - ユーザー管理（作成・編集・削除）
 - **定期CSV自動送信**: スケジュールに従って自動的にCSVをメール送信
 - **データ編集機能**: 管理者が出退勤時刻を編集可能（変更前後の値が監査ログに記録）
 - 監査ログ：`audit_logs`（IP・UA・HMAC署名、編集履歴を含む）
@@ -85,16 +114,29 @@ gunicorn -w 3 -b 0.0.0.0:8000 app:app
 
 ## セキュリティ運用メモ
 
-- `ALLOW_DEV_LOGIN=true` は **ローカル開発用のみ**。本番では必ず **false**。
-- `SECRET_KEY` は十分な長さのランダム値を設定。
+- `SECRET_KEY` は十分な長さのランダム値を設定（本番環境では必須）。
 - 本番は必ず **HTTPS** ＋ `SESSION_COOKIE_SECURE=true` を推奨。
-- 管理者メールは `ADMIN_EMAILS` に登録。
+- **パスワード管理**: 
+  - 初期パスワードは強力なものを設定してください
+  - 定期的なパスワード変更を推奨
+  - 管理者はユーザー管理画面からパスワードをリセット可能
+- **ユーザー管理**: 
+  - 管理者は `/admin/users` からユーザーの作成・編集・削除が可能
+  - 自分自身を削除することはできません
 - **データ編集機能**: 管理者による出退勤データの編集は監査ログに変更前後の値が記録されます。監査要件を満たしています。
 
 ---
 
 ## 困ったとき
 
-- Google OAuth 設定が面倒 → まずは `ALLOW_DEV_LOGIN=true` で画面/動線を確認
+- **ログインできない**: 初期管理者ユーザーが作成されているか確認してください
+- **パスワードを忘れた**: 他の管理者ユーザーからパスワードをリセットできます。管理者がいない場合は、データベースに直接アクセスしてパスワードをリセットする必要があります
 - PostgreSQL が準備できない → 一時的に SQLite で試し、後から `DATABASE_URL` を置換
 - テーブルは初回アクセス時に自動作成（`before_request: db.create_all()`）
+
+## ユーザー管理について
+
+- **管理者権限**: `role` フィールドが `admin` のユーザーが管理者です
+- **ユーザー作成**: 管理者は管理画面（`/admin/users`）からユーザーを作成できます
+- **パスワードリセット**: 管理者はユーザー編集画面からパスワードを変更できます
+- **ユーザー削除**: 管理者は自分以外のユーザーを削除できます（削除時は関連する出退勤データも削除されます）

@@ -8,9 +8,10 @@
         <div class="text-muted small">表示タイムゾーン: {{ LOCAL_TZ_NAME }}</div>
       </div>
       <div class="d-flex gap-2 flex-wrap">
+        <a class="btn btn-outline-success" href="{{ url_for('admin_users') }}">ユーザー管理</a>
         <a class="btn btn-outline-primary" href="{{ url_for('admin_audit') }}">監査ログ</a>
         <a class="btn btn-outline-info" href="{{ url_for('admin_settings') }}">設定</a>
-        <a class="btn btn-outline-secondary" href="{{ url_for('admin_export', start=start, end=end, email=user_email) }}">CSVエクスポート</a>
+        <a class="btn btn-outline-secondary" href="{{ url_for('admin_export', start=start, end=end, username=user_username) }}">CSVエクスポート</a>
       </div>
     </div>
 
@@ -24,11 +25,11 @@
         <input type="date" class="form-control" name="end" value="{{ end }}">
       </div>
       <div class="col">
-        <label class="form-label">メール（任意）</label>
-        <input type="email" class="form-control" name="email" value="{{ user_email }}" list="admin-email-list" placeholder="name@example.com">
-        <datalist id="admin-email-list">
+        <label class="form-label">ユーザーID（任意）</label>
+        <input type="text" class="form-control" name="username" value="{{ user_username }}" list="admin-username-list" placeholder="username">
+        <datalist id="admin-username-list">
           {% for user in user_candidates %}
-          <option value="{{ user.email }}">{{ user.name or user.email }}</option>
+          <option value="{{ user.username }}">{{ user.name or user.username }}</option>
           {% endfor %}
         </datalist>
       </div>
@@ -92,8 +93,8 @@
           {% for s in shifts %}
           <tr class="{% if s.is_open %}table-warning{% endif %}">
             <td data-label="ユーザー">
-              <div class="fw-semibold">{{ s.user.name or s.user.email }}</div>
-              <div class="text-muted small">{{ s.user.email }}</div>
+              <div class="fw-semibold">{{ s.user.name or s.user.username }}</div>
+              <div class="text-muted small">{{ s.user.username }}{% if s.user.email %} ({{ s.user.email }}){% endif %}</div>
             </td>
             <td data-label="出勤">
               <div>{{ s.clock_in_at|fmt_dt }}</div>
@@ -370,8 +371,9 @@ document.addEventListener('DOMContentLoaded', () => {
           throw new Error('データの取得に失敗しました');
         }
         const data = await response.json();
-        userLabel.textContent = `${data.user_name || data.user_email || ''}`;
+        userLabel.textContent = `${data.user_name || data.user_username || ''}`;
         const summaryParts = [];
+        if (data.user_username) summaryParts.push(`ユーザーID: ${data.user_username}`);
         if (data.user_email) summaryParts.push(`メール: ${data.user_email}`);
         if (data.worked_hms) summaryParts.push(`実働: ${data.worked_hms}`);
         summaryLabel.textContent = summaryParts.join(' ／ ');
