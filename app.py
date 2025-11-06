@@ -7,12 +7,14 @@ import json
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict
 from zoneinfo import ZoneInfo
+import click
 
 from flask import Flask, render_template, redirect, url_for, session, request, abort, flash, make_response, jsonify, has_request_context
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import generate_password_hash, check_password_hash
+from sqlalchemy.exc import IntegrityError
 
 def env_bool(name, default=False):
     v = os.getenv(name)
@@ -86,6 +88,15 @@ class Shift(db.Model):
     clock_out_ua = db.Column(db.String(300))
     created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     breaks = db.relationship("Break", backref="shift", lazy=True, cascade="all, delete-orphan", passive_deletes=True)
+    __table_args__ = (
+        db.Index(
+            "ix_shifts_user_open_unique",
+            "user_id",
+            unique=True,
+            sqlite_where=(clock_out_at.is_(None)),
+            postgresql_where=(clock_out_at.is_(None)),
+        ),
+    )
     @property
     def is_open(self):
         return self.clock_out_at is None
@@ -118,6 +129,15 @@ class Break(db.Model):
     start_ua = db.Column(db.String(300))
     end_ip = db.Column(db.String(100))
     end_ua = db.Column(db.String(300))
+    __table_args__ = (
+        db.Index(
+            "ix_breaks_shift_open_unique",
+            "shift_id",
+            unique=True,
+            sqlite_where=(end_at.is_(None)),
+            postgresql_where=(end_at.is_(None)),
+        ),
+    )
 
 class AuditLog(db.Model):
     __tablename__ = "audit_logs"
@@ -349,7 +369,12 @@ def clock_in():
         abort(400, "すでに出勤中です。先に退勤してください。")
     now = datetime.now(timezone.utc)
     shift = Shift(user_id=current_user.id, clock_in_at=now, clock_in_ip=client_ip(), clock_in_ua=user_agent())
-    db.session.add(shift); db.session.commit()
+    db.session.add(shift)
+    try:
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        abort(400, "別の端末から既に出勤が記録されました。画面を更新して確認してください。")
     log_audit("clock_in", target_type="shift", target_id=shift.id, metadata_dict={"at": shift.clock_in_at.isoformat()})
     flash("出勤を記録しました。", "success")
     return redirect(url_for("dashboard"))
@@ -379,7 +404,12 @@ def break_start():
         abort(400, "既に休憩中です。先に休憩終了をしてください。")
     now = datetime.now(timezone.utc)
     b = Break(shift_id=shift.id, start_at=now, start_ip=client_ip(), start_ua=user_agent())
-    db.session.add(b); db.session.commit()
+    db.session.add(b)
+    try:
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        abort(400, "他端末から休憩開始済みです。画面を更新して再確認してください。")
     log_audit("break_start", target_type="break", target_id=b.id, metadata_dict={"at": b.start_at.isoformat(), "shift_id": shift.id})
     flash("休憩開始を記録しました。", "success")
     return redirect(url_for("dashboard"))
@@ -618,9 +648,16 @@ def admin_shift_edit(shift_id):
                     "clock_in_at": shift.clock_in_at.isoformat() if shift.clock_in_at else None,
                     "clock_out_at": shift.clock_out_at.isoformat() if shift.clock_out_at else None,
                 }
-                
-                shift.clock_in_at = parse_local_datetime(request.form.get("clock_in_at"), "出勤時刻")
-                shift.clock_out_at = parse_local_datetime(request.form.get("clock_out_at"), "退勤時刻")
+
+                clock_in_at = parse_local_datetime(request.form.get("clock_in_at"), "出勤時刻")
+                if not clock_in_at:
+                    raise ValueError("出勤時刻を入力してください。")
+                clock_out_at = parse_local_datetime(request.form.get("clock_out_at"), "退勤時刻")
+                if clock_out_at and clock_out_at < clock_in_at:
+                    raise ValueError("退勤時刻は出勤時刻以降を指定してください。")
+
+                shift.clock_in_at = clock_in_at
+                shift.clock_out_at = clock_out_at
                 
                 db.session.commit()
                 
@@ -923,11 +960,19 @@ def admin_users():
             if User.query.filter_by(username=username).first():
                 flash("このユーザーIDは既に使用されています。", "error")
                 return redirect(url_for("admin_users"))
+            if email and User.query.filter_by(email=email).first():
+                flash("このメールアドレスは既に使用されています。", "error")
+                return redirect(url_for("admin_users"))
             
             user = User(username=username, name=name or None, email=email or None, role=role)
             user.set_password(password)
-            db.session.add(user)
-            db.session.commit()
+            try:
+                db.session.add(user)
+                db.session.commit()
+            except IntegrityError:
+                db.session.rollback()
+                flash("ユーザーの作成中にエラーが発生しました。入力内容を確認してください。", "error")
+                return redirect(url_for("admin_users"))
             log_audit("admin_user_create", target_type="user", target_id=user.id, 
                      metadata_dict={"username": username, "role": role})
             flash("ユーザーを作成しました。", "success")
@@ -949,7 +994,17 @@ def admin_users():
             if password:
                 user.set_password(password)
             
-            db.session.commit()
+            if email:
+                existing = User.query.filter(User.email == email, User.id != user.id).first()
+                if existing:
+                    flash("このメールアドレスは既に使用されています。", "error")
+                    return redirect(url_for("admin_users"))
+            try:
+                db.session.commit()
+            except IntegrityError:
+                db.session.rollback()
+                flash("ユーザーの更新に失敗しました。入力内容を確認してください。", "error")
+                return redirect(url_for("admin_users"))
             log_audit("admin_user_update", target_type="user", target_id=user.id,
                      metadata_dict={"username": user.username, "role": role, "password_changed": bool(password)})
             flash("ユーザーを更新しました。", "success")
@@ -983,15 +1038,11 @@ def healthz():
 def inject_globals():
     return {"current_user": current_user, "is_admin": (current_user.is_authenticated and current_user.is_admin()), "LOCAL_TZ_NAME": str(LOCAL_TZ)}
 
-def init_database():
-    """アプリ起動時に一度だけテーブルを作成"""
-    with app.app_context():
-        db.create_all()
-
-try:
-    init_database()
-except Exception as e:
-    app.logger.exception(f"Failed to initialize database: {e}")
+@app.cli.command("init-db")
+def init_db_command():
+    """Create all database tables."""
+    db.create_all()
+    click.echo("Initialized the database.")
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")), debug=True)
