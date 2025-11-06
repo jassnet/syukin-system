@@ -16,10 +16,12 @@
         <input type="text" class="form-control" value="{{ shift.user.name }} ({{ shift.user.email }})" disabled>
       </div>
       
+      <input type="hidden" name="action" value="update_shift">
+      
       <div class="mb-3">
         <label class="form-label">出勤時刻 ({{ LOCAL_TZ_NAME }})</label>
         <input type="datetime-local" class="form-control" name="clock_in_at" 
-               value="{% if clock_in_local %}{{ clock_in_local.strftime('%Y-%m-%dT%H:%M') }}{% endif %}"
+               value="{{ clock_in_form }}"
                step="60">
         <small class="form-text text-muted">
           {% if shift.clock_in_at %}
@@ -34,7 +36,7 @@
       <div class="mb-3">
         <label class="form-label">退勤時刻 ({{ LOCAL_TZ_NAME }})</label>
         <input type="datetime-local" class="form-control" name="clock_out_at"
-               value="{% if clock_out_local %}{{ clock_out_local.strftime('%Y-%m-%dT%H:%M') }}{% endif %}"
+               value="{{ clock_out_form }}"
                step="60">
         <small class="form-text text-muted">
           {% if shift.clock_out_at %}
@@ -62,6 +64,73 @@
         <a href="{{ url_for('admin') }}" class="btn btn-secondary">キャンセル</a>
       </div>
     </form>
+    
+    <hr class="my-4">
+    
+    <div class="mt-4">
+      <h3 class="h6 mb-3">休憩管理</h3>
+      <p class="text-muted small mb-3">休憩の追加・編集・削除ができます。リセットするとこのシフトの休憩が全て削除されます。</p>
+      
+      <div class="border rounded p-3 mb-4 bg-light-subtle">
+        <form method="POST" class="row gy-2 gx-3 align-items-end">
+          <input type="hidden" name="csrf_token" value="{{ session.csrf_token }}">
+          <input type="hidden" name="action" value="break_add">
+          <div class="col-md-4">
+            <label class="form-label mb-1">開始 ({{ LOCAL_TZ_NAME }})</label>
+            <input type="datetime-local" name="start_at" class="form-control" required>
+          </div>
+          <div class="col-md-4">
+            <label class="form-label mb-1">終了 (任意)</label>
+            <input type="datetime-local" name="end_at" class="form-control">
+          </div>
+          <div class="col-md-4">
+            <button type="submit" class="btn btn-outline-primary w-100">休憩を追加</button>
+          </div>
+        </form>
+        <form method="POST" class="mt-3" onsubmit="return confirm('本当に休憩をリセットしますか？')">
+          <input type="hidden" name="csrf_token" value="{{ session.csrf_token }}">
+          <input type="hidden" name="action" value="break_reset">
+          <button type="submit" class="btn btn-outline-danger w-100">休憩をリセット</button>
+        </form>
+      </div>
+      
+      {% if break_entries %}
+        <div class="list-group mb-4">
+          {% for br in break_entries %}
+            <div class="list-group-item">
+              <form method="POST" class="row gy-2 gx-3 align-items-end">
+                <input type="hidden" name="csrf_token" value="{{ session.csrf_token }}">
+                <input type="hidden" name="action" value="break_update">
+                <input type="hidden" name="break_id" value="{{ br.id }}">
+                <div class="col-md-4">
+                  <label class="form-label mb-1">開始 ({{ LOCAL_TZ_NAME }})</label>
+                  <input type="datetime-local" name="start_at" class="form-control" value="{{ br.start_form }}" required>
+                </div>
+                <div class="col-md-4">
+                  <label class="form-label mb-1">終了 (任意)</label>
+                  <input type="datetime-local" name="end_at" class="form-control" value="{{ br.end_form }}">
+                  {% if br.is_open %}<small class="text-danger">進行中</small>{% endif %}
+                </div>
+                <div class="col-md-4">
+                  <button type="submit" class="btn btn-primary w-100">更新</button>
+                </div>
+              </form>
+              <div class="d-flex justify-content-between align-items-center mt-2 flex-wrap gap-2">
+                <small class="text-muted">UTC: {{ br.start_utc or '-' }} ～ {{ br.end_utc or '-' }}</small>
+                <form method="POST" onsubmit="return confirm('この休憩を削除しますか？')">
+                  <input type="hidden" name="csrf_token" value="{{ session.csrf_token }}">
+                  <input type="hidden" name="action" value="break_delete">
+                  <input type="hidden" name="break_id" value="{{ br.id }}">
+                  <button type="submit" class="btn btn-outline-danger btn-sm">削除</button>
+                </form>
+              </div>
+            </div>
+          {% endfor %}
+        </div>
+      {% else %}
+        <p class="text-muted">登録されている休憩はありません。</p>
+      {% endif %}
+    </div>
     
     <div class="mt-4">
       <h3 class="h6">編集履歴</h3>

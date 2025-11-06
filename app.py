@@ -194,6 +194,39 @@ def ensure_aware(dt):
         return dt.replace(tzinfo=timezone.utc)
     return dt
 
+def parse_local_datetime(value, field_label="日時"):
+    """datetime-localなどから受け取ったローカル時刻文字列をUTCに変換"""
+    if value is None:
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    formats = ("%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M:%S")
+    last_error = None
+    for fmt in formats:
+        try:
+            local_dt = datetime.strptime(value, fmt)
+            return local_dt.replace(tzinfo=LOCAL_TZ).astimezone(timezone.utc)
+        except ValueError as e:
+            last_error = e
+    raise ValueError(f"{field_label}の形式が不正です: {value}") from last_error
+
+def format_local_form_value(dt):
+    """datetime-local入力用の文字列を生成"""
+    dt = ensure_aware(dt)
+    if not dt:
+        return ""
+    return dt.astimezone(LOCAL_TZ).strftime("%Y-%m-%dT%H:%M")
+
+def admin_redirect_with_filters():
+    """管理画面のフィルタ値を維持したままリダイレクト"""
+    params = {}
+    for key in ("start", "end", "username"):
+        value = request.form.get(key, "").strip()
+        if value:
+            params[key] = value
+    return redirect(url_for("admin", **params))
+
 def log_audit(action, target_type=None, target_id=None, metadata_dict=None):
     try:
         md = json.dumps(metadata_dict or {}, ensure_ascii=False, separators=(",", ":"))
@@ -231,25 +264,29 @@ def load_user(user_id):
     return User.query.get(int(user_id))
 
 @app.template_filter("fmt_dt")
-def fmt_dt(dt):
+def fmt_dt(dt, full=False):
     if not dt:
         return "-"
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     local = dt.astimezone(LOCAL_TZ)
     weekday = WEEKDAY_JA[local.weekday()]
-    return f"{local.year}年{local.month:02d}月{local.day:02d}日({weekday}) {local.hour:02d}:{local.minute:02d}:{local.second:02d}"
+    if full:
+        return f"{local.year}年{local.month:02d}月{local.day:02d}日({weekday}) {local.hour:02d}:{local.minute:02d}:{local.second:02d}"
+    return f"{local.month:02d}月{local.day:02d}日({weekday}) {local.hour:02d}:{local.minute:02d}"
 
 @app.template_filter("fmt_hms")
-def fmt_hms(seconds):
+def fmt_hms(seconds, precise=False):
     seconds = int(seconds or 0)
     h = seconds // 3600
     m = (seconds % 3600) // 60
     s = seconds % 60
-    return f"{h:02d}:{m:02d}:{s:02d}"
+    if precise:
+        return f"{h:02d}:{m:02d}:{s:02d}"
+    return f"{h:02d}:{m:02d}"
 
 @app.template_filter("fmt_date_ja")
-def fmt_date_ja(value):
+def fmt_date_ja(value, full=False):
     if not value:
         return "-"
     if isinstance(value, datetime):
@@ -261,7 +298,9 @@ def fmt_date_ja(value):
         except ValueError:
             return value
     weekday = WEEKDAY_JA[value.weekday()]
-    return f"{value.year}年{value.month:02d}月{value.day:02d}日({weekday})"
+    if full:
+        return f"{value.year}年{value.month:02d}月{value.day:02d}日({weekday})"
+    return f"{value.month:02d}月{value.day:02d}日({weekday})"
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
@@ -305,7 +344,10 @@ def dashboard():
     if open_shift:
         open_break = Break.query.filter_by(shift_id=open_shift.id, end_at=None).order_by(Break.id.desc()).first()
     recent = Shift.query.filter_by(user_id=current_user.id).order_by(Shift.clock_in_at.desc()).limit(10).all()
-    return render_template("dashboard.html", open_shift=open_shift, open_break=open_break, recent=recent)
+    admin_overview = None
+    if current_user.is_admin():
+        admin_overview = build_admin_overview(None, None, "")
+    return render_template("dashboard.html", open_shift=open_shift, open_break=open_break, recent=recent, admin_overview=admin_overview)
 
 def _get_open_shift_or_abort(user_id):
     s = Shift.query.filter_by(user_id=user_id, clock_out_at=None).order_by(Shift.id.desc()).first()
@@ -386,50 +428,84 @@ def admin():
     require_admin()
     ensure_csrf()
     start = request.args.get("start"); end = request.args.get("end"); user_username = request.args.get("username", "").strip()
-    now_local = datetime.now(LOCAL_TZ)
-    default_end = now_local.date(); default_start = default_end - timedelta(days=13)
-    try:
-        start_date = datetime.fromisoformat(start).date() if start else default_start
-        end_date = datetime.fromisoformat(end).date() if end else default_end
-    except ValueError:
-        abort(400, "日付の形式が不正です。YYYY-MM-DD で指定してください。")
-    start_utc = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=LOCAL_TZ).astimezone(timezone.utc)
-    end_utc = datetime.combine(end_date, datetime.max.time()).replace(tzinfo=LOCAL_TZ).astimezone(timezone.utc)
-    q = Shift.query.join(User).filter(Shift.clock_in_at >= start_utc, Shift.clock_in_at <= end_utc)
-    if user_username:
-        q = q.filter(User.username == user_username)
-    shifts = q.order_by(Shift.clock_in_at.desc()).all()
-
-    daily_buckets = defaultdict(lambda: {"seconds": 0, "count": 0})
-    for s in shifts:
-        if not s.clock_in_at:
-            continue
-        local_date = s.clock_in_at.astimezone(LOCAL_TZ).date()
-        bucket = daily_buckets[local_date]
-        bucket["seconds"] += s.worked_seconds()
-        bucket["count"] += 1
-
-    daily_totals = [
-        {
-            "date": date_key,
-            "seconds": bucket["seconds"],
-            "worked_hms": fmt_hms(bucket["seconds"]),
-            "count": bucket["count"],
-        }
-        for date_key, bucket in sorted(daily_buckets.items(), reverse=True)
-    ]
-
-    user_candidates = User.query.order_by(User.username.asc()).all()
+    context = build_admin_overview(start, end, user_username, include_candidates=True)
 
     return render_template(
         "admin.html",
-        shifts=shifts,
-        start=start_date.isoformat(),
-        end=end_date.isoformat(),
-        user_username=user_username,
-        daily_totals=daily_totals,
-        user_candidates=user_candidates,
+        **context,
     )
+
+@app.route("/admin/shift/create", methods=["POST"])
+@login_required
+def admin_shift_create():
+    require_admin()
+    verify_csrf()
+    try:
+        user_id = request.form.get("user_id")
+        if not user_id:
+            raise ValueError("ユーザーを選択してください。")
+        user = User.query.get(user_id)
+        if not user:
+            raise ValueError("指定されたユーザーが見つかりません。")
+        clock_in_at = parse_local_datetime(request.form.get("clock_in_at"), "出勤時刻")
+        if not clock_in_at:
+            raise ValueError("出勤時刻を入力してください。")
+        clock_out_at = parse_local_datetime(request.form.get("clock_out_at"), "退勤時刻")
+        if clock_out_at and clock_out_at < clock_in_at:
+            raise ValueError("退勤時刻は出勤時刻以降を指定してください。")
+        shift = Shift(
+            user_id=user.id,
+            clock_in_at=clock_in_at,
+            clock_out_at=clock_out_at,
+            clock_in_ip=client_ip(),
+            clock_in_ua=user_agent(),
+            clock_out_ip=client_ip() if clock_out_at else None,
+            clock_out_ua=user_agent() if clock_out_at else None,
+        )
+        db.session.add(shift)
+        db.session.commit()
+        log_audit(
+            "admin_shift_create",
+            target_type="shift",
+            target_id=shift.id,
+            metadata_dict={
+                "user_username": user.username,
+                "clock_in_at": shift.clock_in_at.isoformat() if shift.clock_in_at else None,
+                "clock_out_at": shift.clock_out_at.isoformat() if shift.clock_out_at else None,
+            },
+        )
+        flash("出退勤記録を追加しました。", "success")
+    except ValueError as e:
+        flash(str(e), "error")
+    except Exception as e:
+        db.session.rollback()
+        app.logger.exception("Failed to create shift: %s", e)
+        flash("出退勤記録の追加に失敗しました。", "error")
+    return admin_redirect_with_filters()
+
+@app.route("/admin/shift/<int:shift_id>/delete", methods=["POST"])
+@login_required
+def admin_shift_delete(shift_id):
+    require_admin()
+    verify_csrf()
+    shift = Shift.query.get_or_404(shift_id)
+    metadata = {
+        "user_username": shift.user.username if shift.user else None,
+        "clock_in_at": shift.clock_in_at.isoformat() if shift.clock_in_at else None,
+        "clock_out_at": shift.clock_out_at.isoformat() if shift.clock_out_at else None,
+        "break_count": len(shift.breaks),
+        "worked_seconds": shift.worked_seconds(),
+    }
+    try:
+        db.session.delete(shift)
+        db.session.commit()
+        log_audit("admin_shift_delete", target_type="shift", target_id=shift_id, metadata_dict=metadata)
+        flash("出退勤記録を削除しました。", "success")
+    except Exception as e:
+        db.session.rollback()
+        app.logger.exception("Failed to delete shift: %s", e)
+        flash("出退勤記録の削除に失敗しました。", "error")
+    return admin_redirect_with_filters()
 
 def generate_csv(start_date, end_date, user_username=None, user_email=None):
     """CSVデータを生成する共通関数"""
@@ -463,6 +539,55 @@ def generate_csv(start_date, end_date, user_username=None, user_email=None):
             len(s.breaks), brk_sec, f"{brk_sec//3600:02d}:{(brk_sec%3600)//60:02d}:{brk_sec%60:02d}",
         ])
     return buf.getvalue().encode("utf-8-sig"), len(shifts)
+
+def build_admin_overview(start_arg=None, end_arg=None, user_username="", include_candidates=False):
+    now_local = datetime.now(LOCAL_TZ)
+    default_end = now_local.date()
+    default_start = default_end - timedelta(days=13)
+
+    try:
+        start_date = datetime.fromisoformat(start_arg).date() if start_arg else default_start
+        end_date = datetime.fromisoformat(end_arg).date() if end_arg else default_end
+    except ValueError:
+        abort(400, "日付の形式が不正です。YYYY-MM-DD で指定してください。")
+
+    start_utc = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=LOCAL_TZ).astimezone(timezone.utc)
+    end_utc = datetime.combine(end_date, datetime.max.time()).replace(tzinfo=LOCAL_TZ).astimezone(timezone.utc)
+
+    q = Shift.query.join(User).filter(Shift.clock_in_at >= start_utc, Shift.clock_in_at <= end_utc)
+    if user_username:
+        q = q.filter(User.username == user_username)
+    shifts = q.order_by(Shift.clock_in_at.desc()).all()
+
+    daily_buckets = defaultdict(lambda: {"seconds": 0, "count": 0})
+    for s in shifts:
+        if not s.clock_in_at:
+            continue
+        local_date = s.clock_in_at.astimezone(LOCAL_TZ).date()
+        bucket = daily_buckets[local_date]
+        bucket["seconds"] += s.worked_seconds()
+        bucket["count"] += 1
+
+    daily_totals = [
+        {
+            "date": date_key,
+            "seconds": bucket["seconds"],
+            "worked_hms": fmt_hms(bucket["seconds"]),
+            "count": bucket["count"],
+        }
+        for date_key, bucket in sorted(daily_buckets.items(), reverse=True)
+    ]
+
+    context = {
+        "shifts": shifts,
+        "start": start_date.isoformat(),
+        "end": end_date.isoformat(),
+        "user_username": user_username,
+        "daily_totals": daily_totals,
+    }
+    if include_candidates:
+        context["user_candidates"] = User.query.order_by(User.username.asc()).all()
+    return context
 
 @app.route("/admin/export")
 @login_required
@@ -568,71 +693,139 @@ def admin_shift_edit(shift_id):
     
     if request.method == "POST":
         verify_csrf()
-        
-        # 変更前の値を保存（監査ログ用）
-        old_values = {
-            "clock_in_at": shift.clock_in_at.isoformat() if shift.clock_in_at else None,
-            "clock_out_at": shift.clock_out_at.isoformat() if shift.clock_out_at else None,
-        }
-        
-        # 新しい値を取得
-        clock_in_str = request.form.get("clock_in_at", "").strip()
-        clock_out_str = request.form.get("clock_out_at", "").strip()
+        action = request.form.get("action", "update_shift")
         
         try:
-            # 日時文字列をパース（datetime-local形式: YYYY-MM-DDTHH:MM または YYYY-MM-DD HH:MM:SS）
-            if clock_in_str:
-                # datetime-local形式 (YYYY-MM-DDTHH:MM) を処理
-                if "T" in clock_in_str:
-                    clock_in_local = datetime.strptime(clock_in_str, "%Y-%m-%dT%H:%M")
-                else:
-                    clock_in_local = datetime.strptime(clock_in_str, "%Y-%m-%d %H:%M:%S")
-                shift.clock_in_at = clock_in_local.replace(tzinfo=LOCAL_TZ).astimezone(timezone.utc)
-            else:
-                shift.clock_in_at = None
+            if action == "update_shift":
+                old_values = {
+                    "clock_in_at": shift.clock_in_at.isoformat() if shift.clock_in_at else None,
+                    "clock_out_at": shift.clock_out_at.isoformat() if shift.clock_out_at else None,
+                }
                 
-            if clock_out_str:
-                # datetime-local形式 (YYYY-MM-DDTHH:MM) を処理
-                if "T" in clock_out_str:
-                    clock_out_local = datetime.strptime(clock_out_str, "%Y-%m-%dT%H:%M")
-                else:
-                    clock_out_local = datetime.strptime(clock_out_str, "%Y-%m-%d %H:%M:%S")
-                shift.clock_out_at = clock_out_local.replace(tzinfo=LOCAL_TZ).astimezone(timezone.utc)
+                shift.clock_in_at = parse_local_datetime(request.form.get("clock_in_at"), "出勤時刻")
+                shift.clock_out_at = parse_local_datetime(request.form.get("clock_out_at"), "退勤時刻")
+                
+                db.session.commit()
+                
+                new_values = {
+                    "clock_in_at": shift.clock_in_at.isoformat() if shift.clock_in_at else None,
+                    "clock_out_at": shift.clock_out_at.isoformat() if shift.clock_out_at else None,
+                }
+                
+                log_audit("admin_shift_edit", target_type="shift", target_id=shift_id,
+                         metadata_dict={
+                             "user_username": shift.user.username,
+                             "user_email": shift.user.email or "",
+                             "old_values": old_values,
+                             "new_values": new_values,
+                         })
+                flash("出退勤データを更新しました。", "success")
+                return redirect(url_for("admin"))
+            
+            elif action == "break_add":
+                start_at = parse_local_datetime(request.form.get("start_at"), "休憩開始時刻")
+                end_at = parse_local_datetime(request.form.get("end_at"), "休憩終了時刻")
+                if not start_at:
+                    raise ValueError("休憩開始時刻を入力してください。")
+                if end_at and end_at < start_at:
+                    raise ValueError("休憩終了時刻は開始時刻以降を指定してください。")
+                new_break = Break(shift_id=shift.id, start_at=start_at, end_at=end_at)
+                db.session.add(new_break)
+                db.session.commit()
+                log_audit("admin_break_add", target_type="break", target_id=new_break.id,
+                         metadata_dict={
+                             "shift_id": shift.id,
+                             "start_at": new_break.start_at.isoformat() if new_break.start_at else None,
+                             "end_at": new_break.end_at.isoformat() if new_break.end_at else None,
+                         })
+                flash("休憩を追加しました。", "success")
+                return redirect(url_for("admin_shift_edit", shift_id=shift_id))
+            
+            elif action == "break_update":
+                break_id = int(request.form.get("break_id", "0"))
+                target_break = Break.query.filter_by(id=break_id, shift_id=shift_id).first()
+                if not target_break:
+                    abort(404, "指定された休憩が見つかりません。")
+                old_values = {
+                    "start_at": target_break.start_at.isoformat() if target_break.start_at else None,
+                    "end_at": target_break.end_at.isoformat() if target_break.end_at else None,
+                }
+                start_at = parse_local_datetime(request.form.get("start_at"), "休憩開始時刻")
+                end_at = parse_local_datetime(request.form.get("end_at"), "休憩終了時刻")
+                if not start_at:
+                    raise ValueError("休憩開始時刻を入力してください。")
+                if end_at and end_at < start_at:
+                    raise ValueError("休憩終了時刻は開始時刻以降を指定してください。")
+                target_break.start_at = start_at
+                target_break.end_at = end_at
+                db.session.commit()
+                new_values = {
+                    "start_at": target_break.start_at.isoformat() if target_break.start_at else None,
+                    "end_at": target_break.end_at.isoformat() if target_break.end_at else None,
+                }
+                log_audit("admin_break_update", target_type="break", target_id=target_break.id,
+                         metadata_dict={
+                             "shift_id": shift.id,
+                             "old_values": old_values,
+                             "new_values": new_values,
+                         })
+                flash("休憩を更新しました。", "success")
+                return redirect(url_for("admin_shift_edit", shift_id=shift_id))
+            
+            elif action == "break_delete":
+                break_id = int(request.form.get("break_id", "0"))
+                target_break = Break.query.filter_by(id=break_id, shift_id=shift_id).first()
+                if not target_break:
+                    abort(404, "指定された休憩が見つかりません。")
+                metadata = {
+                    "shift_id": shift.id,
+                    "start_at": target_break.start_at.isoformat() if target_break.start_at else None,
+                    "end_at": target_break.end_at.isoformat() if target_break.end_at else None,
+                }
+                db.session.delete(target_break)
+                db.session.commit()
+                log_audit("admin_break_delete", target_type="break", target_id=break_id,
+                         metadata_dict=metadata)
+                flash("休憩を削除しました。", "success")
+                return redirect(url_for("admin_shift_edit", shift_id=shift_id))
+            
+            elif action == "break_reset":
+                deleted_ids = [b.id for b in shift.breaks]
+                for b in list(shift.breaks):
+                    db.session.delete(b)
+                db.session.commit()
+                log_audit("admin_break_reset", target_type="shift", target_id=shift_id,
+                         metadata_dict={"deleted_break_ids": deleted_ids})
+                flash("休憩をリセットしました。", "success")
+                return redirect(url_for("admin_shift_edit", shift_id=shift_id))
+            
             else:
-                shift.clock_out_at = None
-            
-            db.session.commit()
-            
-            # 変更後の値を保存
-            new_values = {
-                "clock_in_at": shift.clock_in_at.isoformat() if shift.clock_in_at else None,
-                "clock_out_at": shift.clock_out_at.isoformat() if shift.clock_out_at else None,
-            }
-            
-            # 監査ログに記録（変更前後の値を含む）
-            log_audit("admin_shift_edit", target_type="shift", target_id=shift_id,
-                     metadata_dict={
-                         "user_username": shift.user.username,
-                         "user_email": shift.user.email or "",
-                         "old_values": old_values,
-                         "new_values": new_values,
-                     })
-            
-            flash("出退勤データを更新しました。", "success")
-            return redirect(url_for("admin"))
+                flash("不正な操作です。", "error")
         except ValueError as e:
-            flash(f"日時の形式が不正です: {e}", "error")
+            flash(str(e), "error")
         except Exception as e:
             db.session.rollback()
             app.logger.exception(f"Failed to update shift: {e}")
             flash("更新に失敗しました。", "error")
     
-    # GETリクエスト時は編集フォームを表示
-    clock_in_local = shift.clock_in_at.astimezone(LOCAL_TZ) if shift.clock_in_at else None
-    clock_out_local = shift.clock_out_at.astimezone(LOCAL_TZ) if shift.clock_out_at else None
+    clock_in_form = format_local_form_value(shift.clock_in_at)
+    clock_out_form = format_local_form_value(shift.clock_out_at)
+    
+    break_entries = []
+    ordered_breaks = sorted(shift.breaks, key=lambda b: (b.start_at or datetime.min.replace(tzinfo=timezone.utc)))
+    for br in ordered_breaks:
+        break_entries.append({
+            "id": br.id,
+            "start_form": format_local_form_value(br.start_at),
+            "end_form": format_local_form_value(br.end_at),
+            "start_utc": br.start_at.isoformat() if br.start_at else None,
+            "end_utc": br.end_at.isoformat() if br.end_at else None,
+            "is_open": br.end_at is None,
+        })
     
     return render_template("shift_edit.html", shift=shift,
-                          clock_in_local=clock_in_local, clock_out_local=clock_out_local,
+                          clock_in_form=clock_in_form, clock_out_form=clock_out_form,
+                          break_entries=break_entries,
                           LOCAL_TZ_NAME=str(LOCAL_TZ))
 
 @app.route("/admin/shift/<int:shift_id>", methods=["GET"])

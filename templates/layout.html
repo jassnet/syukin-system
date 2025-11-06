@@ -18,9 +18,7 @@
       <ul class="navbar-nav me-auto mb-2 mb-lg-0">
         {% if is_admin %}
         <li class="nav-item"><a class="nav-link" href="{{ url_for('admin') }}">管理</a></li>
-        {% if 'admin_settings' in current_app.view_functions %}
         <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_settings') }}">設定</a></li>
-        {% endif %}
         {% endif %}
       </ul>
       <div class="navbar-text d-flex align-items-center flex-wrap gap-2 me-lg-3 mb-2 mb-lg-0">

@@ -39,6 +39,39 @@
       </div>
     </form>
 
+    <div class="mt-4">
+      <div class="border rounded p-3 bg-light-subtle">
+        <h3 class="h6 mb-3">手動で出退勤を追加</h3>
+        <form class="row gy-3 align-items-end" method="POST" action="{{ url_for('admin_shift_create') }}">
+          <input type="hidden" name="csrf_token" value="{{ session.csrf_token }}">
+          <input type="hidden" name="start" value="{{ start }}">
+          <input type="hidden" name="end" value="{{ end }}">
+          <input type="hidden" name="username" value="{{ user_username }}">
+          <div class="col-md-3">
+            <label class="form-label">ユーザー</label>
+            <select name="user_id" class="form-select" required>
+              <option value="" disabled selected>選択してください</option>
+              {% for user in user_candidates %}
+              <option value="{{ user.id }}">{{ user.name or user.username }} ({{ user.username }})</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="col-md-3">
+            <label class="form-label">出勤 ({{ LOCAL_TZ_NAME }})</label>
+            <input type="datetime-local" name="clock_in_at" class="form-control" required>
+          </div>
+          <div class="col-md-3">
+            <label class="form-label">退勤 (任意)</label>
+            <input type="datetime-local" name="clock_out_at" class="form-control">
+          </div>
+          <div class="col-md-3 d-grid">
+            <button type="submit" class="btn btn-outline-primary">追加</button>
+          </div>
+        </form>
+        <p class="text-muted small mb-0 mt-2">退勤を空にすると「出勤中」のシフトを作成できます。値は監査ログに記録されます。</p>
+      </div>
+    </div>
+
     {% set ns = namespace(total_seconds=0, total_shifts=0) %}
     {% for day in daily_totals %}
       {% set ns.total_seconds = ns.total_seconds + day.seconds %}
@@ -115,6 +148,13 @@
                   編集
                 </button>
                 <a href="{{ url_for('admin_shift_edit', shift_id=s.id) }}" class="btn btn-sm btn-outline-secondary flex-fill">詳細画面</a>
+                <form method="POST" action="{{ url_for('admin_shift_delete', shift_id=s.id) }}" class="flex-fill" onsubmit="return confirm('この出退勤記録を削除しますか？')">
+                  <input type="hidden" name="csrf_token" value="{{ session.csrf_token }}">
+                  <input type="hidden" name="start" value="{{ start }}">
+                  <input type="hidden" name="end" value="{{ end }}">
+                  <input type="hidden" name="username" value="{{ user_username }}">
+                  <button type="submit" class="btn btn-sm btn-outline-danger w-100">削除</button>
+                </form>
               </div>
             </td>
           </tr>
@@ -183,13 +223,13 @@
             <div class="col-md-4">
               <div class="p-3 rounded bg-body-tertiary h-100">
                 <div class="text-muted small">実働時間</div>
-                <div class="fs-5" id="shiftEditWorked">--:--:--</div>
+              <div class="fs-5" id="shiftEditWorked">--:--</div>
               </div>
             </div>
             <div class="col-md-4">
               <div class="p-3 rounded bg-body-tertiary h-100">
                 <div class="text-muted small">休憩合計</div>
-                <div class="fs-5" id="shiftEditBreaks">--:--:--</div>
+              <div class="fs-5" id="shiftEditBreaks">--:--</div>
                 <div class="text-muted small" id="shiftEditBreakCount"></div>
               </div>
             </div>
@@ -356,8 +396,8 @@ document.addEventListener('DOMContentLoaded', () => {
       clockOutInput.value = '';
       userLabel.textContent = '読み込み中…';
       summaryLabel.textContent = '';
-      workedLabel.textContent = '--:--:--';
-      breaksLabel.textContent = '--:--:--';
+      workedLabel.textContent = '--:--';
+      breaksLabel.textContent = '--:--';
       breakCountLabel.textContent = '';
       ipLabel.textContent = '';
       clockInMeta.textContent = '';
@@ -379,8 +419,8 @@ document.addEventListener('DOMContentLoaded', () => {
         summaryLabel.textContent = summaryParts.join(' ／ ');
         clockInInput.value = data.clock_in_form || '';
         clockOutInput.value = data.clock_out_form || '';
-        workedLabel.textContent = data.worked_hms || '--:--:--';
-        breaksLabel.textContent = data.break_hms || '--:--:--';
+        workedLabel.textContent = data.worked_hms || '--:--';
+        breaksLabel.textContent = data.break_hms || '--:--';
         breakCountLabel.textContent = data.break_count !== undefined ? `休憩回数: ${data.break_count}` : '';
         ipLabel.innerHTML = `${data.clock_in_ip || '-'}<br>${data.clock_out_ip || '-'}`;
         clockInMeta.textContent = buildMetaText(data.clock_in_at, data.clock_in_utc);

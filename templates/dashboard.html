@@ -75,4 +75,89 @@
     </div>
   </div>
 </div>
+
+{% if admin_overview %}
+<div class="card shadow-sm">
+  <div class="card-body">
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+      <div>
+        <h2 class="h5 mb-1">管理者パネル</h2>
+        <div class="text-muted small">対象期間: {{ admin_overview.start }} ～ {{ admin_overview.end }}（{{ LOCAL_TZ_NAME }}）</div>
+      </div>
+      <a class="btn btn-outline-primary btn-sm" href="{{ url_for('admin') }}">詳細管理画面へ</a>
+    </div>
+
+    {% set daily = admin_overview.daily_totals %}
+    {% set shifts_preview = admin_overview.shifts[:5] %}
+    {% set summary = namespace(total_seconds=0, total_shifts=0) %}
+    {% for day in daily %}
+      {% set summary.total_seconds = summary.total_seconds + day.seconds %}
+      {% set summary.total_shifts = summary.total_shifts + day.count %}
+    {% endfor %}
+
+    <div class="row g-3">
+      <div class="col-lg-4">
+        <div class="border rounded p-3 h-100">
+          <div class="fw-semibold mb-2">日別集計</div>
+          <div class="small text-muted mb-2">直近 {{ daily|length }} 日 / 実働 {{ summary.total_seconds|fmt_hms }} / シフト数 {{ summary.total_shifts }}</div>
+          {% if daily %}
+          <table class="table table-sm table-borderless mb-0 small">
+            <tbody>
+              {% for day in daily[:6] %}
+              <tr>
+                <th class="text-nowrap">{{ day.date|fmt_date_ja }}</th>
+                <td class="text-end">{{ day.worked_hms }}</td>
+                <td class="text-end text-muted">{{ day.count }}件</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          {% else %}
+          <p class="text-muted small mb-0">集計対象のシフトがありません。</p>
+          {% endif %}
+        </div>
+      </div>
+      <div class="col-lg-8">
+        <div class="border rounded p-3 h-100">
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <div class="fw-semibold">シフト一覧（最新5件）</div>
+            <a href="{{ url_for('admin') }}" class="small text-decoration-underline">もっと見る</a>
+          </div>
+          <div class="table-responsive">
+            <table class="table table-sm align-middle table-stack mb-0" aria-label="管理者用シフト一覧">
+              <thead class="table-light">
+                <tr>
+                  <th>ユーザー</th>
+                  <th>出勤</th>
+                  <th>退勤</th>
+                  <th>実働/休憩</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for s in shifts_preview %}
+                <tr>
+                  <td data-label="ユーザー">
+                    <div class="fw-semibold">{{ s.user.name or s.user.username }}</div>
+                    <div class="text-muted small">{{ s.user.username }}</div>
+                  </td>
+                  <td data-label="出勤">{{ s.clock_in_at|fmt_dt }}</td>
+                  <td data-label="退勤">{{ s.clock_out_at|fmt_dt }}</td>
+                  <td data-label="実働/休憩">
+                    <div class="fw-semibold">{{ s.worked_seconds()|fmt_hms }}</div>
+                    <div class="text-muted small">休憩 {{ s.total_break_seconds()|fmt_hms }}</div>
+                  </td>
+                </tr>
+                {% else %}
+                <tr><td colspan="4" class="text-muted">表示できるシフトがありません。</td></tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          <p class="text-muted small mb-0 mt-2">操作が必要な場合は上部リンクから管理画面を開いてください。</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endif %}
 {% endblock %}

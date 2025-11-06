@@ -62,7 +62,7 @@
             {% set log = entry.log %}
             {% set metadata = entry.metadata %}
             <tr>
-              <td data-label="日時">{{ log.created_at|fmt_dt }}</td>
+              <td data-label="日時">{{ log.created_at|fmt_dt(True) }}</td>
               <td data-label="ユーザー">
                 {% if log.user %}
                   <div class="fw-semibold">{{ log.user.name or log.user.username }}</div>
