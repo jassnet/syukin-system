@@ -216,27 +216,6 @@ Flaskアプリケーションのすべてのエンドポイント一覧です。
 
 **レスポンス**: CSVファイル（ダウンロード）
 
-#### GET/POST /admin/settings
-**ファイル位置**: `app.py` 791-859行目
-
-**認証**: ログイン必須 + 管理者権限
-
-**機能**: システム設定（表示・更新）
-
-**POST パラメータ**:
-- `csrf_token`: CSRFトークン（必須）
-- `csv_export_email`: CSV送信先メールアドレス
-- `csv_export_schedule`: CSV送信スケジュール
-- `csv_export_days`: CSV送信日数
-- `smtp_host`: SMTPホスト
-- `smtp_port`: SMTPポート
-- `smtp_user`: SMTP認証ユーザー名
-- `smtp_password`: SMTP認証パスワード
-- `smtp_use_tls`: SMTP TLS使用フラグ
-- `smtp_from`: 送信元メールアドレス
-
-**テンプレート**: `templates/admin_settings.html`
-
 ### ヘルスチェック
 
 #### GET /healthz

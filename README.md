@@ -84,11 +84,7 @@ with app.app_context():
     - `TIMEZONE`（例: `Asia/Tokyo`）: 表示用タイムゾーン
     - `DATABASE_URL`（**PostgreSQL** のURL）: 本番環境では必須
     - `SESSION_COOKIE_SECURE=true`（HTTPS運用時）: HTTPSを使用する場合は必須
-    - **定期CSV送信**（任意）:
-      - `CSV_EXPORT_EMAIL`: 送信先メールアドレス
-      - `CSV_EXPORT_SCHEDULE`: `daily`（毎日）/ `weekly`（毎週月曜）/ `monthly`（毎月1日）/ cron形式（例: `0 9 * * *`）
-      - `CSV_EXPORT_DAYS`: 過去何日分をエクスポートするか（既定: 30日）
-      - `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_USE_TLS`, `SMTP_FROM`
+    - `CSV_EXPORT_MAX_DAYS`（任意）: 管理画面から手動でエクスポートできる最大日数（既定: 365日）
   - **デプロイ後**: 初期管理者ユーザーを作成してください（上記の「初期管理者ユーザーの作成」を参照）
 
 > 任意の PaaS を使えます（**Docker 不要**）。`Procfile` があるので多くのサービスでそのまま起動できます。
@@ -105,7 +101,7 @@ with app.app_context():
   - CSV エクスポート
   - 出退勤データの編集
   - ユーザー管理（作成・編集・削除）
-- **定期CSV自動送信**: スケジュールに従って自動的にCSVをメール送信
+- **CSVエクスポート**: 管理画面から対象期間を指定して手動でCSVを取得可能。取得期間は `CSV_EXPORT_MAX_DAYS` 以内に制限されています。
 - **データ編集機能**: 管理者が出退勤時刻を編集可能（変更前後の値が監査ログに記録）
 - 監査ログ：`audit_logs`（IP・UA・HMAC署名、編集履歴を含む）
 - すべての時刻は **UTC 保存**、表示は `TIMEZONE`（既定: Asia/Tokyo）

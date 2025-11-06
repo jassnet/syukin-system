@@ -8,16 +8,11 @@ from datetime import datetime, timezone, timedelta
 from collections import defaultdict
 from zoneinfo import ZoneInfo
 
-from flask import Flask, render_template, redirect, url_for, session, request, abort, flash, make_response, jsonify
+from flask import Flask, render_template, redirect, url_for, session, request, abort, flash, make_response, jsonify, has_request_context
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import generate_password_hash, check_password_hash
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from email.mime.base import MIMEBase
-from email import encoders
 
 def env_bool(name, default=False):
     v = os.getenv(name)
@@ -39,10 +34,8 @@ app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["SESSION_COOKIE_SECURE"] = env_bool("SESSION_COOKIE_SECURE", False)
 
 LOCAL_TZ = ZoneInfo(os.getenv("TIMEZONE", "Asia/Tokyo"))
-# 定期CSV送信設定
-CSV_EXPORT_EMAIL = os.getenv("CSV_EXPORT_EMAIL", "").strip()
-CSV_EXPORT_SCHEDULE = os.getenv("CSV_EXPORT_SCHEDULE", "")  # 例: "daily" (毎日), "weekly" (毎週月曜), "monthly" (毎月1日), cron形式も可
-CSV_EXPORT_DAYS = int(os.getenv("CSV_EXPORT_DAYS", "30"))  # 過去何日分をエクスポートするか
+# CSVエクスポート期間の上限（管理画面・手動エクスポート共通）
+CSV_EXPORT_MAX_DAYS = max(1, int(os.getenv("CSV_EXPORT_MAX_DAYS", "365")))
 
 db = SQLAlchemy(app)
 
@@ -62,7 +55,13 @@ class User(db.Model, UserMixin):
     role = db.Column(db.String(20), default="user")
     created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     last_login_at = db.Column(db.DateTime(timezone=True))
-    shifts = db.relationship("Shift", backref="user", lazy=True)
+    shifts = db.relationship(
+        "Shift",
+        backref=db.backref("user", lazy=True),
+        lazy=True,
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
     
     def set_password(self, password):
         """パスワードをハッシュ化して設定"""
@@ -78,7 +77,7 @@ class User(db.Model, UserMixin):
 class Shift(db.Model):
     __tablename__ = "shifts"
     id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     clock_in_at = db.Column(db.DateTime(timezone=True), nullable=False)
     clock_out_at = db.Column(db.DateTime(timezone=True), nullable=True)
     clock_in_ip = db.Column(db.String(100))
@@ -86,7 +85,7 @@ class Shift(db.Model):
     clock_out_ip = db.Column(db.String(100))
     clock_out_ua = db.Column(db.String(300))
     created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-    breaks = db.relationship("Break", backref="shift", lazy=True, cascade="all, delete-orphan")
+    breaks = db.relationship("Break", backref="shift", lazy=True, cascade="all, delete-orphan", passive_deletes=True)
     @property
     def is_open(self):
         return self.clock_out_at is None
@@ -112,7 +111,7 @@ class Shift(db.Model):
 class Break(db.Model):
     __tablename__ = "breaks"
     id = db.Column(db.Integer, primary_key=True)
-    shift_id = db.Column(db.Integer, db.ForeignKey("shifts.id"), nullable=False, index=True)
+    shift_id = db.Column(db.Integer, db.ForeignKey("shifts.id", ondelete="CASCADE"), nullable=False, index=True)
     start_at = db.Column(db.DateTime(timezone=True), nullable=False)
     end_at = db.Column(db.DateTime(timezone=True), nullable=True)
     start_ip = db.Column(db.String(100))
@@ -123,7 +122,7 @@ class Break(db.Model):
 class AuditLog(db.Model):
     __tablename__ = "audit_logs"
     id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True, index=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
     user = db.relationship("User", backref="audit_logs")
     action = db.Column(db.String(50), nullable=False)
     target_type = db.Column(db.String(50))
@@ -133,46 +132,6 @@ class AuditLog(db.Model):
     metadata_json = db.Column(db.Text)
     created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     signature = db.Column(db.String(128))
-
-class SystemConfig(db.Model):
-    __tablename__ = "system_configs"
-    id = db.Column(db.Integer, primary_key=True)
-    key = db.Column(db.String(100), unique=True, nullable=False, index=True)
-    value = db.Column(db.Text)
-    updated_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
-    updated_by = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
-    
-    @staticmethod
-    def get(key, default=None):
-        """設定値を取得（環境変数をフォールバック）"""
-        config = SystemConfig.query.filter_by(key=key).first()
-        if config and config.value:
-            return config.value
-        # 環境変数から取得（後方互換性のため）
-        return os.getenv(key, default)
-    
-    @staticmethod
-    def set(key, value, user_id=None):
-        """設定値を保存"""
-        config = SystemConfig.query.filter_by(key=key).first()
-        if config:
-            config.value = value
-            config.updated_at = datetime.now(timezone.utc)
-            config.updated_by = user_id
-        else:
-            config = SystemConfig(key=key, value=value, updated_by=user_id)
-            db.session.add(config)
-        db.session.commit()
-        return config
-    
-    @staticmethod
-    def get_all():
-        """全ての設定を辞書形式で取得"""
-        configs = SystemConfig.query.all()
-        result = {}
-        for config in configs:
-            result[config.key] = config.value
-        return result
 
 def client_ip():
     xff = request.headers.get("X-Forwarded-For")
@@ -193,6 +152,15 @@ def ensure_aware(dt):
     if dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt
+
+def ensure_valid_range(start_date, end_date):
+    """開始・終了日の妥当性を検証（最大期間もチェック）"""
+    if start_date > end_date:
+        raise ValueError("終了日は開始日以降を指定してください。")
+    span_days = (end_date - start_date).days + 1
+    if span_days > CSV_EXPORT_MAX_DAYS:
+        raise ValueError(f"期間は最大{CSV_EXPORT_MAX_DAYS}日までにしてください。")
+    return start_date, end_date
 
 def parse_local_datetime(value, field_label="日時"):
     """datetime-localなどから受け取ったローカル時刻文字列をUTCに変換"""
@@ -227,17 +195,25 @@ def admin_redirect_with_filters():
             params[key] = value
     return redirect(url_for("admin", **params))
 
-def log_audit(action, target_type=None, target_id=None, metadata_dict=None):
+def log_audit(action, target_type=None, target_id=None, metadata_dict=None, *, user_id=None, ip=None, user_agent_str=None):
     try:
         md = json.dumps(metadata_dict or {}, ensure_ascii=False, separators=(",", ":"))
         sig = sign_payload(f"{action}|{target_type}|{target_id}|{md}")
+        if has_request_context():
+            derived_user_id = current_user.get_id() if current_user.is_authenticated else None
+            derived_ip = client_ip()
+            derived_ua = user_agent()
+        else:
+            derived_user_id = None
+            derived_ip = None
+            derived_ua = None
         entry = AuditLog(
-            user_id=(current_user.get_id() if current_user.is_authenticated else None),
+            user_id=user_id if user_id is not None else derived_user_id,
             action=action,
             target_type=target_type,
             target_id=target_id,
-            ip=client_ip(),
-            user_agent=user_agent(),
+            ip=ip if ip is not None else derived_ip,
+            user_agent=user_agent_str if user_agent_str is not None else derived_ua,
             metadata_json=md,
             signature=sig,
         )
@@ -346,7 +322,10 @@ def dashboard():
     recent = Shift.query.filter_by(user_id=current_user.id).order_by(Shift.clock_in_at.desc()).limit(10).all()
     admin_overview = None
     if current_user.is_admin():
-        admin_overview = build_admin_overview(None, None, "")
+        try:
+            admin_overview = build_admin_overview(None, None, "")
+        except ValueError as e:
+            flash(str(e), "error")
     return render_template("dashboard.html", open_shift=open_shift, open_break=open_break, recent=recent, admin_overview=admin_overview)
 
 def _get_open_shift_or_abort(user_id):
@@ -428,7 +407,10 @@ def admin():
     require_admin()
     ensure_csrf()
     start = request.args.get("start"); end = request.args.get("end"); user_username = request.args.get("username", "").strip()
-    context = build_admin_overview(start, end, user_username, include_candidates=True)
+    try:
+        context = build_admin_overview(start, end, user_username, include_candidates=True)
+    except ValueError as e:
+        abort(400, str(e))
 
     return render_template(
         "admin.html",
@@ -509,6 +491,7 @@ def admin_shift_delete(shift_id):
 
 def generate_csv(start_date, end_date, user_username=None, user_email=None):
     """CSVデータを生成する共通関数"""
+    start_date, end_date = ensure_valid_range(start_date, end_date)
     start_utc = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=LOCAL_TZ).astimezone(timezone.utc)
     end_utc = datetime.combine(end_date, datetime.max.time()).replace(tzinfo=LOCAL_TZ).astimezone(timezone.utc)
     
@@ -551,6 +534,7 @@ def build_admin_overview(start_arg=None, end_arg=None, user_username="", include
     except ValueError:
         abort(400, "日付の形式が不正です。YYYY-MM-DD で指定してください。")
 
+    start_date, end_date = ensure_valid_range(start_date, end_date)
     start_utc = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=LOCAL_TZ).astimezone(timezone.utc)
     end_utc = datetime.combine(end_date, datetime.max.time()).replace(tzinfo=LOCAL_TZ).astimezone(timezone.utc)
 
@@ -602,7 +586,11 @@ def admin_export():
         end_date = datetime.fromisoformat(end).date() if end else default_end
     except ValueError:
         abort(400, "日付の形式が不正です。YYYY-MM-DD で指定してください。")
-    
+    try:
+        start_date, end_date = ensure_valid_range(start_date, end_date)
+    except ValueError as e:
+        abort(400, str(e))
+
     csv_data, shift_count = generate_csv(start_date, end_date, user_username if user_username else None, user_email if user_email else None)
     filename = f"attendance_export_{start_date.isoformat()}_{end_date.isoformat()}.csv"
     resp = make_response(csv_data)
@@ -610,77 +598,6 @@ def admin_export():
     resp.headers["Content-Disposition"] = f"attachment; filename={filename}"
     log_audit("admin_export", target_type="shift", target_id=None, metadata_dict={"start": start_date.isoformat(), "end": end_date.isoformat(), "email": user_email, "shift_count": shift_count})
     return resp
-
-def send_csv_email(to_email, csv_data, start_date, end_date):
-    """CSVファイルをメールで送信"""
-    try:
-        smtp_host = SystemConfig.get("SMTP_HOST", os.getenv("SMTP_HOST", "localhost"))
-        smtp_port = int(SystemConfig.get("SMTP_PORT", os.getenv("SMTP_PORT", "25")))
-        smtp_user = SystemConfig.get("SMTP_USER", os.getenv("SMTP_USER", ""))
-        smtp_password = SystemConfig.get("SMTP_PASSWORD", os.getenv("SMTP_PASSWORD", ""))
-        smtp_use_tls_str = SystemConfig.get("SMTP_USE_TLS", os.getenv("SMTP_USE_TLS", "false"))
-        smtp_use_tls = smtp_use_tls_str.lower() in ("true", "1", "yes", "on")
-        
-        msg = MIMEMultipart()
-        smtp_from = SystemConfig.get("SMTP_FROM", os.getenv("SMTP_FROM", smtp_user or "noreply@example.com"))
-        msg["From"] = smtp_from
-        msg["To"] = to_email
-        msg["Subject"] = f"出退勤データ CSV - {start_date.isoformat()} ～ {end_date.isoformat()}"
-        
-        body = f"""出退勤システムからの定期CSVエクスポートです。
-
-期間: {start_date.isoformat()} ～ {end_date.isoformat()}
-
-CSVファイルを添付しています。
-"""
-        msg.attach(MIMEText(body, "plain", "utf-8"))
-        
-        filename = f"attendance_export_{start_date.isoformat()}_{end_date.isoformat()}.csv"
-        attachment = MIMEBase("application", "octet-stream")
-        attachment.set_payload(csv_data)
-        encoders.encode_base64(attachment)
-        attachment.add_header("Content-Disposition", f"attachment; filename={filename}")
-        msg.attach(attachment)
-        
-        with smtplib.SMTP(smtp_host, smtp_port) as server:
-            if smtp_use_tls:
-                server.starttls()
-            if smtp_user and smtp_password:
-                server.login(smtp_user, smtp_password)
-            server.send_message(msg)
-        
-        app.logger.info(f"CSV email sent to {to_email}")
-        return True
-    except Exception as e:
-        app.logger.exception(f"Failed to send CSV email: {e}")
-        return False
-
-def get_csv_export_config():
-    """CSVエクスポート設定を取得（DB優先、環境変数フォールバック）"""
-    email = SystemConfig.get("CSV_EXPORT_EMAIL", os.getenv("CSV_EXPORT_EMAIL", "").strip())
-    schedule = SystemConfig.get("CSV_EXPORT_SCHEDULE", os.getenv("CSV_EXPORT_SCHEDULE", ""))
-    days = int(SystemConfig.get("CSV_EXPORT_DAYS", os.getenv("CSV_EXPORT_DAYS", "30")))
-    return email, schedule, days
-
-def scheduled_csv_export():
-    """定期CSVエクスポートのジョブ関数"""
-    with app.app_context():
-        email, schedule, days = get_csv_export_config()
-        if not email:
-            return
-        
-        now_local = datetime.now(LOCAL_TZ)
-        end_date = now_local.date()
-        start_date = end_date - timedelta(days=days)
-        
-        try:
-            csv_data, shift_count = generate_csv(start_date, end_date, None, None)
-            send_csv_email(email, csv_data, start_date, end_date)
-            log_audit("scheduled_csv_export", target_type="system", target_id=None, 
-                     metadata_dict={"email": email, "start": start_date.isoformat(), 
-                                   "end": end_date.isoformat(), "shift_count": shift_count})
-        except Exception as e:
-            app.logger.exception(f"Scheduled CSV export failed: {e}")
 
 @app.route("/admin/shift/<int:shift_id>/edit", methods=["GET", "POST"])
 @login_required
@@ -981,85 +898,6 @@ def admin_audit_export():
 
     return resp
 
-@app.route("/admin/settings", methods=["GET", "POST"])
-@login_required
-def admin_settings():
-    """システム設定ページ"""
-    require_admin()
-    ensure_csrf()
-    
-    if request.method == "POST":
-        verify_csrf()
-        
-        # CSVエクスポート設定を更新
-        csv_email = request.form.get("csv_export_email", "").strip()
-        # スケジュール値はselectまたはcron入力から取得
-        csv_schedule = request.form.get("csv_export_schedule", "").strip()
-        if not csv_schedule:
-            # フォールバック: カスタムcron形式が送られてきた場合
-            csv_schedule = request.form.get("csv_export_schedule_cron", "").strip()
-        csv_days = request.form.get("csv_export_days", "30").strip()
-        smtp_host = request.form.get("smtp_host", "").strip()
-        smtp_port = request.form.get("smtp_port", "25").strip()
-        smtp_user = request.form.get("smtp_user", "").strip()
-        smtp_password = request.form.get("smtp_password", "").strip()
-        smtp_use_tls = env_bool("smtp_use_tls", False)
-        if request.form.get("smtp_use_tls"):
-            smtp_use_tls = True
-        smtp_from = request.form.get("smtp_from", "").strip()
-        
-        user_id = current_user.id if current_user.is_authenticated else None
-        
-        try:
-            SystemConfig.set("CSV_EXPORT_EMAIL", csv_email, user_id)
-            SystemConfig.set("CSV_EXPORT_SCHEDULE", csv_schedule, user_id)
-            SystemConfig.set("CSV_EXPORT_DAYS", csv_days, user_id)
-            SystemConfig.set("SMTP_HOST", smtp_host, user_id)
-            SystemConfig.set("SMTP_PORT", smtp_port, user_id)
-            SystemConfig.set("SMTP_USER", smtp_user, user_id)
-            SystemConfig.set("SMTP_PASSWORD", smtp_password, user_id)
-            SystemConfig.set("SMTP_USE_TLS", "true" if smtp_use_tls else "false", user_id)
-            SystemConfig.set("SMTP_FROM", smtp_from, user_id)
-            
-            # スケジューラーを更新
-            update_scheduler()
-            
-            # 監査ログに記録
-            log_audit("admin_settings_update", target_type="system", target_id=None,
-                     metadata_dict={"updated_keys": ["CSV_EXPORT_EMAIL", "CSV_EXPORT_SCHEDULE", "CSV_EXPORT_DAYS", 
-                                                     "SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_USE_TLS", "SMTP_FROM"]})
-            
-            flash("設定を保存しました。", "success")
-            return redirect(url_for("admin_settings"))
-        except Exception as e:
-            db.session.rollback()
-            app.logger.exception(f"Failed to save settings: {e}")
-            flash("設定の保存に失敗しました。", "error")
-    
-    # GETリクエスト時は設定を表示
-    config = SystemConfig.get_all()
-    # 環境変数からのフォールバック
-    csv_email = config.get("CSV_EXPORT_EMAIL") or os.getenv("CSV_EXPORT_EMAIL", "")
-    csv_schedule = config.get("CSV_EXPORT_SCHEDULE") or os.getenv("CSV_EXPORT_SCHEDULE", "")
-    csv_days = config.get("CSV_EXPORT_DAYS") or os.getenv("CSV_EXPORT_DAYS", "30")
-    smtp_host = config.get("SMTP_HOST") or os.getenv("SMTP_HOST", "localhost")
-    smtp_port = config.get("SMTP_PORT") or os.getenv("SMTP_PORT", "25")
-    smtp_user = config.get("SMTP_USER") or os.getenv("SMTP_USER", "")
-    smtp_password = config.get("SMTP_PASSWORD") or os.getenv("SMTP_PASSWORD", "")
-    smtp_use_tls = config.get("SMTP_USE_TLS", os.getenv("SMTP_USE_TLS", "false")).lower() in ("true", "1", "yes", "on")
-    smtp_from = config.get("SMTP_FROM") or os.getenv("SMTP_FROM", "")
-    
-    return render_template("admin_settings.html",
-                         csv_email=csv_email,
-                         csv_schedule=csv_schedule,
-                         csv_days=csv_days,
-                         smtp_host=smtp_host,
-                         smtp_port=smtp_port,
-                         smtp_user=smtp_user,
-                         smtp_password=smtp_password,
-                         smtp_use_tls=smtp_use_tls,
-                         smtp_from=smtp_from)
-
 @app.route("/admin/users", methods=["GET", "POST"])
 @login_required
 def admin_users():
@@ -1126,6 +964,7 @@ def admin_users():
                 return redirect(url_for("admin_users"))
             
             username = user.username
+            AuditLog.query.filter_by(user_id=user.id).update({"user_id": None})
             db.session.delete(user)
             db.session.commit()
             log_audit("admin_user_delete", target_type="user", target_id=user_id,
@@ -1140,91 +979,19 @@ def admin_users():
 def healthz():
     return "ok"
 
-@app.before_request
-def ensure_db():
-    db.create_all()
-
 @app.context_processor
 def inject_globals():
     return {"current_user": current_user, "is_admin": (current_user.is_authenticated and current_user.is_admin()), "LOCAL_TZ_NAME": str(LOCAL_TZ)}
 
-# グローバルスケジューラー
-_scheduler = None
+def init_database():
+    """アプリ起動時に一度だけテーブルを作成"""
+    with app.app_context():
+        db.create_all()
 
-def get_trigger_from_schedule(schedule_str):
-    """スケジュール文字列からCronTriggerを生成"""
-    from apscheduler.triggers.cron import CronTrigger
-    
-    schedule_lower = schedule_str.lower().strip()
-    
-    if schedule_lower == "daily":
-        # 毎日 朝9時に実行
-        return CronTrigger(hour=9, minute=0, timezone=LOCAL_TZ)
-    elif schedule_lower == "weekly":
-        # 毎週月曜日 朝9時に実行
-        return CronTrigger(day_of_week="mon", hour=9, minute=0, timezone=LOCAL_TZ)
-    elif schedule_lower == "monthly":
-        # 毎月1日 朝9時に実行
-        return CronTrigger(day=1, hour=9, minute=0, timezone=LOCAL_TZ)
-    elif " " in schedule_str and schedule_str.count(" ") >= 4:
-        # cron形式（例: "0 9 * * *" → 毎日9時）
-        try:
-            parts = schedule_str.split()
-            if len(parts) == 5:
-                # CronTriggerのパラメータ: minute, hour, day, month, day_of_week
-                return CronTrigger(minute=parts[0], hour=parts[1], day=parts[2], month=parts[3], day_of_week=parts[4], timezone=LOCAL_TZ)
-            else:
-                app.logger.warning(f"Invalid cron format: {schedule_str}")
-                return None
-        except Exception as e:
-            app.logger.warning(f"Failed to parse cron schedule: {e}")
-            return None
-    else:
-        app.logger.warning(f"Unknown schedule format: {schedule_str}")
-        return None
-
-def update_scheduler():
-    """スケジューラーを更新（設定変更時に呼び出し）"""
-    global _scheduler
-    from apscheduler.schedulers.background import BackgroundScheduler
-    
-    email, schedule, days = get_csv_export_config()
-    
-    # 既存のスケジューラーを停止
-    if _scheduler:
-        try:
-            _scheduler.shutdown(wait=False)
-        except:
-            pass
-        _scheduler = None
-    
-    # 設定がない場合はスケジューラーを起動しない
-    if not email or not schedule:
-        app.logger.info("CSV export scheduler disabled (email or schedule not set)")
-        return
-    
-    # 新しいスケジューラーを起動
-    try:
-        trigger = get_trigger_from_schedule(schedule)
-        if not trigger:
-            return
-        
-        _scheduler = BackgroundScheduler()
-        _scheduler.add_job(func=scheduled_csv_export, trigger=trigger, id="csv_export_job", replace_existing=True)
-        _scheduler.start()
-        app.logger.info(f"Scheduled CSV export updated: {schedule} -> {email}")
-    except Exception as e:
-        app.logger.exception(f"Failed to update scheduler: {e}")
-
-def init_scheduler():
-    """スケジューラーを初期化（起動時）"""
-    update_scheduler()
-
-# アプリ起動時にスケジューラーを初期化
 try:
-    init_scheduler()
+    init_database()
 except Exception as e:
-    app.logger.exception(f"Failed to initialize scheduler: {e}")
+    app.logger.exception(f"Failed to initialize database: {e}")
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")), debug=True)
