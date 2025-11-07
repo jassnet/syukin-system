@@ -325,9 +325,10 @@ def login():
     
     return render_template("login.html")
 
-@app.route("/logout")
+@app.route("/logout", methods=["POST"])
 @login_required
 def logout():
+    verify_csrf()
     log_audit("logout", target_type="user", target_id=current_user.id)
     logout_user()
     return redirect(url_for("login"))
@@ -1045,6 +1046,8 @@ def healthz():
 
 @app.context_processor
 def inject_globals():
+    if current_user.is_authenticated:
+        ensure_csrf()
     return {"current_user": current_user, "is_admin": (current_user.is_authenticated and current_user.is_admin()), "LOCAL_TZ_NAME": str(LOCAL_TZ)}
 
 @app.cli.command("init-db")
