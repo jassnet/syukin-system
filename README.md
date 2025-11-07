@@ -3,6 +3,8 @@
 **目的:** Docker を使えない環境でも、できるだけ簡単に **ローカル実行** & **PaaS でデプロイ** できる構成。  
 DB は本番を **PostgreSQL** 想定。ローカルは簡易に **SQLite** でも動きます（同一コード）。
 
+**本番環境:** Renderにデプロイ済み（2025-11-07）
+
 ---
 
 ## クイックスタート（ローカル・最短）
@@ -76,21 +78,28 @@ with app.app_context():
 
 ---
 
-## デプロイ（Docker 不要の PaaS 想定）
+## デプロイ（Render推奨）
 
-- **手順の基本形**（Heroku/Render等の「Procfile + Python」互換 PaaS）
-  - リポジトリを登録（GitHub 連携など）
-  - Build コマンド: `pip install -r requirements.txt`
-  - Start コマンド: `gunicorn app:app`
-  - 環境変数を登録：
-    - `SECRET_KEY`: セッション暗号化用の秘密鍵（ランダムな長い文字列）
-    - `TIMEZONE`（例: `Asia/Tokyo`）: 表示用タイムゾーン
-    - `DATABASE_URL`（**PostgreSQL** のURL）: 本番環境では必須
-    - `SESSION_COOKIE_SECURE=true`（HTTPS運用時）: HTTPSを使用する場合は必須
-    - `CSV_EXPORT_MAX_DAYS`（任意）: 管理画面から手動でエクスポートできる最大日数（既定: 365日）
-  - **デプロイ後**: 初期管理者ユーザーを作成してください（上記の「初期管理者ユーザーの作成」を参照）
+本システムは **Render** にデプロイされています（2025-11-07）。
 
-> 任意の PaaS を使えます（**Docker 不要**）。`Procfile` があるので多くのサービスでそのまま起動できます。
+### Renderでのデプロイ手順
+
+1. **Renderアカウント作成**: https://dashboard.render.com
+2. **PostgreSQLデータベース作成**: 「New」→「Postgres」を選択
+3. **Web Service作成**: 「New」→「Web Service」を選択
+   - GitHubリポジトリを連携
+   - Build Command: `pip install -r requirements.txt`
+   - Start Command: `gunicorn app:app`
+4. **環境変数設定**:
+   - `SECRET_KEY`: セッション暗号化用の秘密鍵（`python -c "import secrets; print(secrets.token_urlsafe(32))"`で生成）
+   - `DATABASE_URL`: PostgreSQLのInternal Database URL（自動設定される場合あり）
+   - `TIMEZONE`: `Asia/Tokyo`
+   - `SESSION_COOKIE_SECURE`: `true`（HTTPS使用時）
+5. **デプロイ後**: Shellタブからデータベース初期化と管理者ユーザー作成を実行
+
+詳細は [デプロイメントガイド](docs/12-デプロイメント.md) を参照してください。
+
+> **注意**: 他のPaaS（Heroku、Railway、Fly.io等）でもデプロイ可能です。`Procfile` があるので多くのサービスでそのまま起動できます。
 
 ---
 
