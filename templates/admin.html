@@ -274,6 +274,10 @@ document.addEventListener('DOMContentLoaded', () => {
   const clockInMeta = document.getElementById('shiftEditClockInMeta');
   const clockOutMeta = document.getElementById('shiftEditClockOutMeta');
 
+  if (ipLabel) {
+    ipLabel.style.whiteSpace = 'pre-line';
+  }
+
   const toggleLoading = (state) => {
     if (!loadingBox) return;
     loadingBox.classList.toggle('d-none', !state);
@@ -421,7 +425,9 @@ document.addEventListener('DOMContentLoaded', () => {
         workedLabel.textContent = data.worked_hms || '--:--';
         breaksLabel.textContent = data.break_hms || '--:--';
         breakCountLabel.textContent = data.break_count !== undefined ? `休憩回数: ${data.break_count}` : '';
-        ipLabel.innerHTML = `${data.clock_in_ip || '-'}<br>${data.clock_out_ip || '-'}`;
+        const clockInIp = data.clock_in_ip || '-';
+        const clockOutIp = data.clock_out_ip || '-';
+        ipLabel.textContent = `${clockInIp}\n${clockOutIp}`;
         clockInMeta.textContent = buildMetaText(data.clock_in_at, data.clock_in_utc);
         clockOutMeta.textContent = buildMetaText(data.clock_out_at, data.clock_out_utc);
       } catch (err) {

@@ -14,7 +14,9 @@ from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import generate_password_hash, check_password_hash
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import selectinload
 
 def env_bool(name, default=False):
     v = os.getenv(name)
@@ -154,9 +156,8 @@ class AuditLog(db.Model):
     signature = db.Column(db.String(128))
 
 def client_ip():
-    xff = request.headers.get("X-Forwarded-For")
-    if xff:
-        return xff.split(",")[0].strip()
+    if request.access_route:
+        return request.access_route[0]
     return request.remote_addr or "?"
 
 def user_agent():
@@ -524,12 +525,16 @@ def generate_csv(start_date, end_date, user_username=None, user_email=None):
     start_date, end_date = ensure_valid_range(start_date, end_date)
     start_utc = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=LOCAL_TZ).astimezone(timezone.utc)
     end_utc = datetime.combine(end_date, datetime.max.time()).replace(tzinfo=LOCAL_TZ).astimezone(timezone.utc)
-    
-    q = Shift.query.join(User).filter(Shift.clock_in_at >= start_utc, Shift.clock_in_at <= end_utc)
+
+    q = (
+        Shift.query.options(selectinload(Shift.user), selectinload(Shift.breaks))
+        .join(User)
+        .filter(Shift.clock_in_at >= start_utc, Shift.clock_in_at <= end_utc)
+    )
     if user_username:
         q = q.filter(User.username == user_username)
     elif user_email:
-        q = q.filter(User.email == user_email)
+        q = q.filter(func.lower(User.email) == user_email)
     shifts = q.order_by(Shift.clock_in_at.asc()).all()
     
     import csv
@@ -568,7 +573,11 @@ def build_admin_overview(start_arg=None, end_arg=None, user_username="", include
     start_utc = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=LOCAL_TZ).astimezone(timezone.utc)
     end_utc = datetime.combine(end_date, datetime.max.time()).replace(tzinfo=LOCAL_TZ).astimezone(timezone.utc)
 
-    q = Shift.query.join(User).filter(Shift.clock_in_at >= start_utc, Shift.clock_in_at <= end_utc)
+    q = (
+        Shift.query.options(selectinload(Shift.user), selectinload(Shift.breaks))
+        .join(User)
+        .filter(Shift.clock_in_at >= start_utc, Shift.clock_in_at <= end_utc)
+    )
     if user_username:
         q = q.filter(User.username == user_username)
     shifts = q.order_by(Shift.clock_in_at.desc()).all()
