@@ -6,3 +6,14 @@ attendance.db
 instance/
 .DS_Store
 
+# テスト関連
+tests/
+test_*.py
+*_test.py
+.pytest_cache/
+.coverage
+htmlcov/
+test_attendance.db
+*.db-journal
+requirements-test.txt
+
